@@ -1,0 +1,4623 @@
+---
+title: "SCLC_DLL3_scRNA_CTC"
+output: html_document
+date: "2025-04-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document for analyzing 10x scRNA-seq generated from SH for SCLC project.
+
+
+## Step 5: reanalysis with combination of two runs 
+
+## Step 5.1: QC
+
+```{r}
+# Step 2.1: Remove ambient RNA by SoupX
+
+samples <- c("MGHSCLC002","MGHSCLC031","MGHSCLC036","MGHSCLC037")
+
+data.10x = list()
+for (sample in samples){
+  filt.matrix <- Read10X_h5(paste0("../results/", sample,"_combined/outs/filtered_feature_bc_matrix.h5"), use.names = T)
+  raw.matrix <- Read10X_h5(paste0("../results/", sample,"_combined/outs/raw_feature_bc_matrix.h5"), use.names = T)
+  ## issue for cell ranger multi generated singleplex data from the fixed samples.
+  filt_genes <- rownames(filt.matrix)
+
+  # Subset raw.matrix to keep only the genes in filt.matrix
+  raw.matrix_subset <- raw.matrix[rownames(raw.matrix) %in% filt_genes, ]
+  srat <- CreateSeuratObject(counts = filt.matrix)
+  #soup.channel <- SoupChannel(raw.matrix, filt.matrix) raw.matrix_subset
+  soup.channel <- SoupChannel(raw.matrix_subset, filt.matrix)
+  srat <- SCTransform(srat, verbose = F)
+  srat <- RunPCA(srat, verbose = F)
+  srat <- RunUMAP(srat, dims = 1:30, verbose = F)
+  srat <- FindNeighbors(srat, dims = 1:30, verbose = F)
+  srat <- FindClusters(srat, verbose = T)
+  meta <- srat@meta.data
+  umap <- srat@reductions$umap@cell.embeddings
+  soup.channel <- setClusters(soup.channel, setNames(meta$seurat_clusters, rownames(meta)))
+  soup.channel <- setDR(soup.channel, umap)
+  soup.channel <- autoEstCont(soup.channel)
+  data.10x[[sample]] <- adjustCounts(soup.channel, roundToInt = T)
+}
+
+# Create Seurat object after SoupX
+scrna.list = list()
+for (sample in samples) {
+    scrna.list[[sample]] = CreateSeuratObject(counts = data.10x[[sample]], min.cells=3, project=sample)
+}
+
+# Remove raw data to save memory
+rm(data.10x)
+                    
+
+# add sample name
+for(i in 1:length(samples)){
+  sample=samples[i]
+  scrna.list[[sample]]$sample <- sample
+}
+
+### Step 2.2: Add percent.mt cell level metadata
+for (sample in samples) {
+  scrna.list[[sample]][["percent.mito"]] <- PercentageFeatureSet(scrna.list[[sample]], pattern = "^MT:|MT-|mt:|mt-") 
+}
+
+dir.create("../results/MGHSCLC002031036037/plots",recursive = TRUE)
+dir.create("../results/MGHSCLC002031036037/Rdata",recursive = TRUE)
+dir.create("../results/MGHSCLC002031036037/text",recursive = TRUE)
+
+# Save scrna.list
+
+saveRDS(scrna.list, paste0("../results/MGHSCLC002031036037/Rdata/","scrna.list.raw.rds"))
+
+
+# merge list of prefiltered Seurat
+scrna.combined_prefilter <- merge(x = scrna.list[[1]], 
+                       y = scrna.list[-1], 
+                       add.cell.id = names(scrna.list))
+# metadata variable
+metadata_prefilter <- scrna.combined_prefilter@meta.data
+
+
+### Step 2.3: prefilter QC plot
+
+
+
+# Visualize the number of cell counts per sample
+metadata_prefilter %>% 
+  	ggplot(aes(x=sample, fill=sample)) +
+  	geom_bar(position="dodge") + geom_text(stat="count",aes(label=after_stat(count)),vjust = 0)  +
+  	theme_classic() + theme(legend.position = "none")+
+  	theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  	theme(plot.title = element_text(hjust=0.5, face="bold")) +
+  	ggtitle("Prefilter NCells ")
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_Prefilter_NCell.pdf"))
+
+
+
+# mito simple
+
+metadata_prefilter %>% 
+  	ggplot(aes(color=sample, x=percent.mito, fill= sample)) + 
+  	geom_density(alpha = 0.2) + 
+  	scale_x_log10() + 
+  	theme_classic() + theme(legend.position = "right")+
+  	ylab("Cell density") +
+  	geom_vline(xintercept = 10) + 
+    ggtitle("Prefilter mito percent Per Cell")
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_Prefilter_Mito_simple.pdf"))
+
+# UMI
+metadata_prefilter %>% 
+  	ggplot(aes(color=sample, x=nCount_RNA, fill= sample)) + 
+  	geom_density(alpha = 0.2) + 
+  	scale_x_log10() + 
+  	theme_classic() + theme(legend.position = "right")+
+  	ylab("Cell density") +
+  	geom_vline(xintercept = 500) + 
+    ggtitle("Prefilter UMIs Per Cell")
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_Prefilter_UMI.pdf"))
+
+# gene
+
+metadata_prefilter %>% 
+  	ggplot(aes(color=sample, x=nFeature_RNA, fill=sample )) + 
+  	geom_density(alpha = 0.2) + 
+  	theme_classic() + theme(legend.position = "right")+
+  	scale_x_log10() + 
+  	geom_vline(xintercept = 300) + 
+    ggtitle("Prefilter Genes Per Cell")
+
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_Prefilter_NGene.pdf"))
+
+
+### Step 2.4 Filter cells based on nCount and nFeature, percent of mito
+gene_cutoff <- 300
+umi_cutoff <-  500
+mito_cutoff <- 10
+for (sample in samples){
+  scrna.list[[sample]] <- subset(scrna.list[[sample]], subset = nCount_RNA > umi_cutoff & nFeature_RNA > gene_cutoff & percent.mito < mito_cutoff )
+}
+
+
+### Step 2.5 remove doublets
+
+### Doublet Finder
+# grab number of cells
+n_cells = list()
+for (sample in samples){
+n_cells[[sample]] <- length(colnames(scrna.list[[sample]]))
+}
+multiplet_rate = list()
+for (sample in samples){
+    if (n_cells[[sample]] <= 500){
+        multiplet_rate[[sample]] = 0.004
+    }else if (n_cells[[sample]] > 500 & n_cells[[sample]] < 2000){
+             multiplet_rate[[sample]] = 0.008 
+    } else if (n_cells[[sample]] >= 2000 & n_cells[[sample]] < 3000){
+      multiplet_rate[[sample]] = 0.016 
+    } else if (n_cells[[sample]] >= 3000 & n_cells[[sample]] < 4000){
+      multiplet_rate[[sample]] = 0.024
+    } else if (n_cells[[sample]] >= 4000 & n_cells[[sample]] < 5000){
+      multiplet_rate[[sample]] = 0.032
+    } else if (n_cells[[sample]] >= 5000 & n_cells[[sample]] < 6000){
+      multiplet_rate[[sample]] = 0.040
+    } else if (n_cells[[sample]] >= 6000 & n_cells[[sample]] < 7000){
+      multiplet_rate[[sample]] = 0.048
+    } else if (n_cells[[sample]] >= 7000 & n_cells[[sample]] < 8000){
+      multiplet_rate[[sample]] = 0.056
+    } else if (n_cells[[sample]] >= 8000 & n_cells[[sample]] < 9000){
+      multiplet_rate[[sample]] = 0.064
+    } else if (n_cells[[sample]] >= 9000 & n_cells[[sample]] < 10000){
+      multiplet_rate[[sample]] = 0.072
+    }else{
+     multiplet_rate[[sample]] = 0.080
+    }
+}
+nExp = list()
+for (sample in samples){
+scrna.list[[sample]] <- scrna.list[[sample]] %>% NormalizeData()
+scrna.list[[sample]] = FindVariableFeatures(scrna.list[[sample]], verbose = F)
+scrna.list[[sample]] = ScaleData(scrna.list[[sample]],verbose = F)
+scrna.list[[sample]] = RunPCA(scrna.list[[sample]], verbose = F)
+# Find significant PCs
+stdv <- scrna.list[[sample]][["pca"]]@stdev
+sum.stdv <- sum(scrna.list[[sample]][["pca"]]@stdev)
+percent.stdv <- (stdv / sum.stdv) * 100
+cumulative <- cumsum(percent.stdv)
+co1 <- which(cumulative > 90 & percent.stdv < 5)[1]
+co2 <- sort(which((percent.stdv[1:length(percent.stdv) - 1] - 
+                       percent.stdv[2:length(percent.stdv)]) > 0.1), 
+              decreasing = T)[1] + 1
+min.pc <- min(co1, co2)
+
+scrna.list[[sample]] = RunUMAP(scrna.list[[sample]], dims = 1:min.pc, verbose = F)
+
+## pK Identification (no ground-truth) ---------------------------------------------------------------------------------------
+sweep.res <- paramSweep(scrna.list[[sample]], PCs = 1:min.pc, sct = FALSE)
+sweep.stats <- summarizeSweep(sweep.res, GT = FALSE)
+bcmvn <- find.pK(sweep.stats)
+# Optimal pK is the max of the bomodality coefficent (BCmvn) distribution
+bcmvn.max <- bcmvn[which.max(bcmvn$BCmetric),]
+optimal.pk <- bcmvn.max$pK
+optimal.pk <- as.numeric(levels(optimal.pk))[optimal.pk]
+
+nExp[[sample]] <- round(ncol(scrna.list[[sample]]) * multiplet_rate[[sample]])  # expected doublets
+scrna.list[[sample]] <- suppressMessages(doubletFinder(scrna.list[[sample]], pN = 0.25, pK = optimal.pk, nExp = nExp[[sample]], PCs = 1:min.pc))
+}
+
+
+DF.name = list()
+for (sample in samples){
+# name of the DF prediction can change, so extract the correct column name.
+DF.name[[sample]] = colnames(scrna.list[[sample]]@meta.data)[grepl("^DF.classification", colnames(scrna.list[[sample]]@meta.data))]
+}
+# Plot the Doublet Finder results
+UMAP_plots <- list()
+for (sample in samples){
+    #UMAP_plots[[sample]] <-  cowplot::plot_grid(ncol = 2, DimPlot(scrna.list[[sample]], group.by = "sample") + NoAxes(),
+    #DimPlot(scrna.list[[sample]], group.by = DF.name[[sample]]) + NoAxes())
+    UMAP_plots[[sample]] <- DimPlot(scrna.list[[sample]], group.by = DF.name[[sample]])
+}
+
+for (sample in samples){
+    pdf(paste0("../results/MGHSCLC002031036037/plots/",sample,"_DoubletFinder_UMAP_Plot.pdf"))
+    print(UMAP_plots[[sample]])
+    dev.off()
+}
+
+VlnPlots = list()
+for (sample in samples){
+VlnPlots[[sample]] <- VlnPlot(scrna.list[[sample]], features = "nFeature_RNA", group.by = DF.name[[sample]], pt.size = 0.1)
+}
+
+for (sample in samples){
+    pdf(paste0("../results/MGHSCLC002031036037/plots/",sample,"_DoubletFinder_VlnPlot.pdf"))
+    print(VlnPlots[[sample]])
+    dev.off()
+}
+
+
+# Remove the Doublet Cells (does not look any real doublet)
+## KEEP IT BUT WITH LABELS FOR doublets and singlets
+# cells.use = list()
+# for (sample in samples){
+#      cells.use[[sample]] <- colnames(scrna.list[[sample]])[which(scrna.list[[sample]][[]][DF.name[[sample]]] == "Singlet")]
+#      scrna.list[[sample]] <- subset(scrna.list[[sample]], cells = cells.use[[sample]])
+# }
+
+for (sample in samples){
+  scrna.list[[sample]]$doublet <- scrna.list[[sample]][[]][DF.name[[sample]]]
+}
+  
+  
+
+
+## Step 2.6 cell cycle scoring
+
+load("/Volumes/rama/labMembers/mao20/reference/cycle.rda")
+
+# Score cells for cell cycle
+for (sample in samples){
+    scrna.list[[sample]] <- CellCycleScoring(scrna.list[[sample]], 
+                                 g2m.features = g2m_genes, 
+                                 s.features = s_genes)
+}
+
+
+# merge list of postfiltered Seurat
+scrna.combined_postfilter <- merge(x = scrna.list[[1]], 
+                       y = scrna.list[-1], 
+                       add.cell.id = names(scrna.list))
+
+## remove DF and pANN columns
+
+scrna.combined_postfilter@meta.data <- scrna.combined_postfilter@meta.data[, -c(which(startsWith(colnames(scrna.combined_postfilter@meta.data),"DF")),which(startsWith(colnames(scrna.combined_postfilter@meta.data),"pANN")))]
+
+# metadata variable
+
+metadata_postfilter <- scrna.combined_postfilter@meta.data
+
+# Save Postfilter
+saveRDS(scrna.combined_postfilter, paste0("../results/MGHSCLC002031036037/Rdata/","scrna.combined_postfilter.seurat.rds"))
+
+### Step 2.7: postfilter QC plot
+
+
+# Visualize the number of cell counts per sample
+
+# Visualize the number of cell counts per sample
+metadata_postfilter %>% 
+  	ggplot(aes(x=sample, fill=sample)) +
+  	geom_bar(position="dodge") + geom_text(stat="count",aes(label=after_stat(count)),vjust = 0)  +
+  	theme_classic() + theme(legend.position = "none")+
+  	theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  	theme(plot.title = element_text(hjust=0.5, face="bold")) +
+  	ggtitle("Postfilter NCells ")
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_Postfilter_NCell.pdf"))
+
+
+
+
+## mito simple
+metadata_postfilter %>% 
+  	ggplot(aes(color=sample, x=percent.mito, fill= sample)) + 
+  	geom_density(alpha = 0.2) + 
+  	scale_x_log10() + 
+  	theme_classic() +theme(legend.position = "right")+
+  	ylab("Cell density") +
+  	geom_vline(xintercept = 10) + 
+    ggtitle("Postfilter mito percent Per Cell")
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_Postfilter_mito_simple.pdf"))
+## UMI
+
+metadata_postfilter %>% 
+  	ggplot(aes(color=sample, x=nCount_RNA, fill= sample)) + 
+  	geom_density(alpha = 0.2) + 
+  	scale_x_log10() + 
+  	theme_classic() +theme(legend.position = "none")+
+  	ylab("Cell density") +
+  	geom_vline(xintercept = 500) + 
+    ggtitle("Postfilter UMIs Transcripts Per Cell")
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_Postfilter_UMI.pdf"))
+## NGene
+
+metadata_postfilter %>% 
+  	ggplot(aes(color=sample, x=nFeature_RNA, fill=sample )) + 
+  	geom_density(alpha = 0.2) + 
+  	theme_classic() +theme(legend.position = "none")+
+  	scale_x_log10() + 
+  	geom_vline(xintercept = 300) + 
+    ggtitle("Postfilter Genes Per Cell")
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_Postfilter_NGene.pdf"))
+
+## check impact of ceel cycle and mito.frac
+
+## check if need to regress out mito.frac and cell cycle
+
+# Normalize the counts
+seurat_phase <- NormalizeData(scrna.combined_postfilter)
+
+# Evaluating effects of cell cycle
+
+# Identify the most variable genes
+seurat_phase <- FindVariableFeatures(seurat_phase, 
+                     selection.method = "vst",
+                     nfeatures = 2000, 
+                     verbose = FALSE)
+		     
+# Scale the counts
+seurat_phase <- ScaleData(seurat_phase)
+
+# Perform PCA
+seurat_phase <- RunPCA(seurat_phase)
+
+# Plot the PCA colored by cell cycle phase
+DimPlot(seurat_phase,
+        reduction = "pca",
+        group.by= "Phase",
+        split.by = "Phase")
+
+ggsave("../results/MGHSCLC002031036037/plots/cell_cycle_PCA.pdf")
+# need to regress out cell cycle phase
+
+## Evaluating effects of mitochondrial expression
+
+# Check quartile values
+summary(seurat_phase@meta.data$percent.mito)
+
+
+# Check quartile values
+mitoqtl <- summary(seurat_phase@meta.data$percent.mito)
+
+# Turn mitoRatio into categorical factor vector based on quartile values
+seurat_phase@meta.data$mitoFr <- cut(seurat_phase@meta.data$percent.mito, 
+                   breaks=c(-Inf, as.numeric(mitoqtl[2]), as.numeric(mitoqtl[3]), as.numeric(mitoqtl[5]), Inf), 
+                   labels=c("Low","Medium","Medium high", "High"))
+# Plot the PCA colored by cell cycle phase
+DimPlot(seurat_phase,
+        reduction = "pca",
+        group.by= "mitoFr",
+        split.by = "mitoFr")
+
+ggsave("../results/MGHSCLC002031036037/plots/mitoFr_PCA.pdf")
+				
+## need to regress out mito but not cell cycle
+
+rm(seurat_phase)
+
+
+
+```
+
+## Step 5.2: clustering and annotation
+
+```{r}
+scrna.combined_postfilter <- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/","scrna.combined_postfilter.seurat.rds"))
+
+scrna.unintegrated <- NormalizeData(scrna.combined_postfilter)
+scrna.unintegrated <- FindVariableFeatures(scrna.unintegrated)
+scrna.unintegrated <- ScaleData(scrna.unintegrated,vars.to.regress = c("percent.mito"))
+scrna.unintegrated <- RunPCA(scrna.unintegrated, npcs = 30, verbose = F)
+
+scrna.unintegrated <- FindNeighbors(scrna.unintegrated, reduction = "pca", dims = 1:30)
+scrna.unintegrated <- FindClusters(scrna.unintegrated, resolution = 0.4)
+
+scrna.unintegrated <- RunUMAP(scrna.unintegrated, reduction = "pca",dims = 1:30, reduction.name = "umap")
+
+
+DimPlot(
+  scrna.unintegrated,
+  reduction = "umap",
+  group.by = c("sample"),
+  combine = FALSE, label.size = 2
+)
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_unintegration_UMAP_by_sample.pdf"))
+
+DimPlot(
+  scrna.unintegrated,
+  reduction = "umap",
+  label.size = 6,
+  label=TRUE
+) #+ theme(legend.position = "none")
+
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_unintegration_UMAP_by_clusters.pdf")))
+
+
+DimPlot(
+  scrna.unintegrated,
+  reduction = "umap",
+  group.by="doublet",
+  combine = FALSE, label.size = 2
+) 
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_unintegration_UMAP_by_doublet.pdf")))
+
+## epithelial
+
+FeaturePlot(scrna.unintegrated, features = c("EPCAM","KRT8","KRT18","KRT19"),label=TRUE)
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_unintegration_UMAP_epithelial_markers_cluster.pdf"))
+
+## SCLC markers
+FeaturePlot(scrna.unintegrated, features = c("ASCL1","NEUROD1","POU2F3","YAP1"))
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_unintegration_UMAP_SCLC_markers_cluster.pdf"))
+
+# Save integrated object
+saveRDS(scrna.unintegrated, paste0("../results/MGHSCLC002031036037/Rdata/","scrna.unintegrated.seurat.rds"))
+
+##NEXT: run NMF for classification
+
+## NMF for annotation
+
+scrna.unintegrated <- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/","scrna.unintegrated.seurat.rds"))
+
+
+
+
+## run NMF
+
+DefaultAssay(scrna.unintegrated) <- "RNA"
+scrna.unintegrated <-JoinLayers(scrna.unintegrated)
+seu.list <- SplitObject(scrna.unintegrated, split.by = "sample")
+
+geneNMF.programs <- multiNMF(seu.list, assay="RNA", k=4:9, min.exp = 0.05)
+
+## combine the gene programs identified over multiple samples and numbers of k into metaprograms
+
+geneNMF.metaprograms <- getMetaPrograms(geneNMF.programs,
+                                        metric = "cosine",
+                                        weight.explained = 0.5,
+                                        nMP=10)
+## visualize pairwise similarity (in terms of cosine similarity or Jaccard index) between individual gene programs that compose meta-programs. 
+pdf(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_NMF_pheatmap_MPs.pdf"))
+plotMetaPrograms(geneNMF.metaprograms,
+                       similarity.cutoff = c(0.1,1))
+dev.off()
+
+
+# inspect useful statistics, such as the “sample coverage” (in what fraction of samples the MP was detected); or the silhouette coefficient (how similar are individual programs in a MP relative to programs in other MPs - the higher the better).
+
+geneNMF.metaprograms$metaprograms.metrics
+
+
+##Interpretation of gene programs
+
+lapply(geneNMF.metaprograms$metaprograms.genes, head)
+
+geneNMF.metaprograms$metaprograms.genes.weights$MP6
+
+
+
+
+## run GSEA to understand MP programs
+
+## collections in msigdbr: https://igordot.github.io/msigdbr/articles/msigdbr-intro.html
+
+##C8: cell type signature
+
+top_p <- lapply(geneNMF.metaprograms$metaprograms.genes, function(program) {
+  runGSEA(program, universe=rownames(scrna.unintegrated), category = "C8",pval.thr = 0.01)
+})
+
+
+head(top_p$MP1)
+
+
+## Signature scores for gene programs
+
+mp.genes <- geneNMF.metaprograms$metaprograms.genes
+
+#scrna.unintegrated@meta.data <-scrna.unintegrated@meta.data[, -which(startsWith(colnames(scrna.unintegrated@meta.data),"MP"))]
+scrna.unintegrated <- AddModuleScore_UCell(scrna.unintegrated, features = mp.genes, ncores=4, name = "")
+
+
+
+VlnPlot(scrna.unintegrated, features=names(mp.genes), pt.size = 0, ncol=5)
+
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_NMF_MPs_score_by_cluster.pdf")))
+
+for (num in 1:10) {
+
+  VlnPlot(scrna.unintegrated, features=names(mp.genes)[num], pt.size = 0, ncol=1)
+
+  ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_NMF_MP",num,"_score.pdf")))
+
+}
+
+
+### let's plot runGSEA results
+
+
+library(data.table)
+
+
+for (num in 1:10) {
+  result <- as.data.frame(top_p[[num]])
+ggplot(result, aes(x = reorder(pathway, foldEnrichment), y = foldEnrichment, fill = padj)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "red", high = "blue") +
+  labs(title = paste0("GSEA Results for MP",num),
+       x = "Pathway",
+       y = "FoldEnrichment") +
+  theme_minimal()
+
+
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_NMF_GSEA_MP",num,".pdf")))
+  
+}
+
+### check a few unknown
+
+relaxed.markers <- FindMarkers(scrna.unintegrated,ident.1="pDC", ident.2="endothelial")
+
+# Extract top 10 markers per cluster
+
+relaxed.markers %>% 
+  top_n(n = 20, 
+        wt = avg_log2FC)
+
+## use singleR 
+
+ref.se <- celldex::HumanPrimaryCellAtlasData()
+
+####get raw counts
+counts <- scrna.unintegrated@assays$RNA$counts
+
+human.main <- SingleR(test = counts,assay.type.test = 1,ref = ref.se,labels = ref.se$label.main)
+
+# add annotation to seurat
+
+###add annotation to meta.data
+types <- human.main$labels
+
+names(types) <- rownames(human.main)
+scrna.unintegrated <- AddMetaData(object = scrna.unintegrated, metadata = types,col.name="singleRanno")
+
+###plot by cell.identity
+
+DimPlot(object = scrna.unintegrated, group.by="singleRanno", label = TRUE, label.size=3,reduction="umap",repel=TRUE)
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_singleR_autoanno_nolegend.pdf"))
+
+
+# Rename all identities
+scrna.unintegrated <- RenameIdents(object = scrna.unintegrated, 
+                                  "0"="neutrophil",
+                                  "1"="platelet",
+                                  "2"="platelet",
+                                  "3"="neutrophil",
+                                  "4"="platelet",
+                                  "5"="mast",
+                                  "6"="epithelial",
+                                  "7"="monocyte",
+                                  "8"="T",
+                                  "9"="NK",
+                                  "10"="platelet",
+                                  "11"="endothelial",
+                                  "12"="doublet?",
+                                  "13"="platelet",
+                                  "14"="RBC",
+                                  "15"="monocyte",
+                                  "16"="plasma",
+                                  "17"="B",
+                                  "18"="pDC"
+                                  )
+
+scrna.unintegrated$final_anno <- scrna.unintegrated@active.ident
+
+DimPlot(
+  scrna.unintegrated,
+  reduction = "umap",
+  group.by = "final_anno",
+  label.size = 4,
+  label=TRUE) #+ theme(legend.position = "none")
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_unintegrated_UMAP_by_final_anno.pdf"))
+
+
+
+
+# Save integrated object
+saveRDS(scrna.unintegrated, paste0("../results/MGHSCLC002031036037/Rdata/","scrna.unintegrated.seurat.withanno.rds"))
+
+
+## plot heatmap with marker genes
+
+scrna.unintegrated <-  readRDS(paste0("../results/MGHSCLC002031036037/Rdata/","scrna.unintegrated.seurat.withanno.rds"))
+
+
+## check if cluster12 have different UMI
+
+VlnPlot(scrna.unintegrated, features="nCount_RNA",group.by="seurat_clusters", pt.size = 0)
+
+## cluster 12 is not different from others; doublets from same cell types?
+
+## plot heatmap of marker genes
+
+
+scrna.unintegrated <- FindVariableFeatures(scrna.unintegrated,nfeatures=10000)
+
+scrna.unintegrated <- ScaleData(scrna.unintegrated,vars.to.regress = c("percent.mito"))
+
+
+topgenes <- c("HBA1","HBB","MS4A1","CD79A","IGLL5","CD3E","CD3D","NCAM1","CD83","NEUROD1","EPCAM","ASCL1","CD14","VWF","ITGA2B","PF4","PPBP","FCER1A","CPA3","S100A8", "S100A9", "FCGR3B","CLEC4C","PLD4")
+
+
+DoHeatmap(scrna.unintegrated, features=topgenes,group.by="final_anno",size=3.5,angle=60,hjust=0.3,vjust=0)+ theme(axis.text.y = element_text(size = 8)) + NoLegend()
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_heatmap_by_cell_type_marker_genes.pdf"))
+
+# Save integrated object
+#saveRDS(scrna.unintegrated, paste0("../results/MGHSCLC002031036037/Rdata/","scrna.unintegrated.seurat.withanno.rds"))
+
+#### downsample
+### remove cluster 12, 10
+
+scrna.sub <- scrna.unintegrated[,!(scrna.unintegrated$seurat_clusters %in% c(12))]
+
+
+scrna.down <- subset(scrna.sub,downsample=1500)
+
+
+scrna.down <- NormalizeData(scrna.down)
+scrna.down <- FindVariableFeatures(scrna.down)
+scrna.down <- ScaleData(scrna.down,vars.to.regress = c("percent.mito"))
+scrna.down <- RunPCA(scrna.down, npcs = 30, verbose = F)
+
+scrna.down <- RunUMAP(scrna.down, reduction = "pca",dims = 1:30, reduction.name = "umap")
+
+
+DimPlot(
+  scrna.down,
+  reduction = "umap",
+  group.by="sample",
+  combine = FALSE, label.size = 6, 
+  label=TRUE
+)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_sample_downsample.pdf")))
+
+
+DimPlot(
+  scrna.down,
+  reduction = "umap",
+  group.by = "final_anno",
+  label.size = 5,
+  label=TRUE
+) + NoLegend()
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_anno_downsample.pdf")))
+
+
+
+# Save object
+saveRDS(scrna.down, paste0("../results/MGHSCLC002031036037/Rdata/","scrna.downsample1500.seurat.rds"))
+
+
+##infercnv
+
+scrna.down<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/","scrna.downsample1500.seurat.rds"))
+
+## create directory
+
+dir.create("../results/MGHSCLC002031036037/inferCNV/inputs/",recursive=TRUE)
+
+counts <- scrna.down@assays$RNA@layers$counts
+
+rownames(counts) <- rownames(scrna.down)
+colnames(counts) <- colnames(scrna.down)
+
+## input 3: sample annotation file
+
+
+annotation <- as.data.frame(scrna.down@meta.data[,c("sample","final_anno")])
+annotation$cell_type <- as.character(annotation$final_anno)
+
+idx <- which(annotation$final_anno %in% c("epithelial"))
+annotation$cell_type[idx] <- paste0(as.character(annotation$final_anno[idx]),"_",as.character(annotation$sample[idx]))
+
+
+annotation <- annotation[3]
+
+write.table(annotation, file="../results/MGHSCLC002031036037/inferCNV/inputs/singleCell.annotation.txt",quote=FALSE,col.names = FALSE,row.names=TRUE,sep="\t")
+
+ 
+# create the infercnv object
+infercnv_obj = CreateInfercnvObject(raw_counts_matrix=counts,
+                                    annotations_file="../results/MGHSCLC002031036037/inferCNV/inputs/singleCell.annotation.txt",
+                                    delim="\t",
+                                    gene_order_file="/data/rama/labMembers/mao20/reference/hg38_gencode_v27.txt",
+                                    chr_exclude = c("chrX","chrY","chrM"),
+                                    ref_group_names=c("platelet","neutrophil","mast","endothelial","T"))
+
+options(scipen = 100)
+# perform infercnv operations to reveal cnv signal
+infercnv_obj = infercnv::run(infercnv_obj,
+                             cutoff=0.1,  # use 1 for smart-seq, 0.1 for 10x-genomics
+                             out_dir="../results/MGHSCLC002031036037/inferCNV/output",  # dir is auto-created for storing outputs
+                             cluster_by_groups=T,   # cluster
+                             analysis_mode= "samples",
+                             denoise=T,
+                             HMM=T,
+                             num_threads=4,
+                             output_format = "pdf"
+                             )
+
+### only epithelial at bottom
+
+scrna.down.sub <- subset(scrna.down,expression=final_anno %in% c("platelet","neutrophil","mast","endothelial","T","epithelial"))
+
+counts <- scrna.down.sub@assays$RNA@layers$counts
+
+rownames(counts) <- rownames(scrna.down.sub)
+colnames(counts) <- colnames(scrna.down.sub)
+
+## input 3: sample annotation file
+
+
+annotation <- as.data.frame(scrna.down.sub@meta.data[,c("sample","final_anno")])
+annotation$cell_type <- as.character(annotation$final_anno)
+
+idx <- which(annotation$final_anno %in% c("epithelial"))
+annotation$cell_type[idx] <- paste0(as.character(annotation$final_anno[idx]),"_",as.character(annotation$sample[idx]))
+
+
+annotation <- annotation[3]
+
+write.table(annotation, file="../results/MGHSCLC002031036037/inferCNV/inputs/singleCell.annotation.sub.txt",quote=FALSE,col.names = FALSE,row.names=TRUE,sep="\t")
+
+ 
+# create the infercnv object
+infercnv_obj = CreateInfercnvObject(raw_counts_matrix=counts,
+                                    annotations_file="../results/MGHSCLC002031036037/inferCNV/inputs/singleCell.annotation.sub.txt",
+                                    delim="\t",
+                                    gene_order_file="/data/rama/labMembers/mao20/reference/hg38_gencode_v27.txt",
+                                    chr_exclude = c("chrX","chrY","chrM"),
+                                    ref_group_names=c("platelet","neutrophil","mast","endothelial","T"))
+
+options(scipen = 100)
+# perform infercnv operations to reveal cnv signal
+infercnv_obj = infercnv::run(infercnv_obj,
+                             cutoff=0.1,  # use 1 for smart-seq, 0.1 for 10x-genomics
+                             out_dir="../results/MGHSCLC002031036037/inferCNV/outputSub",  # dir is auto-created for storing outputs
+                             cluster_by_groups=T,   # cluster
+                             analysis_mode= "samples",
+                             denoise=T,
+                             HMM=T,
+                             num_threads=4,
+                             output_format = "pdf"
+                             )
+
+
+## maligant cells are dominated by those from 037; let's do individual analysis
+```
+
+
+## Step 6: reanalysis by individual
+## Step 6.1: 002
+
+```{r}
+
+## let's start with raw list before filtering
+
+samples <- c("MGHSCLC002","MGHSCLC031","MGHSCLC036","MGHSCLC037")
+
+scrna.list <- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/","scrna.list.raw.rds"))
+
+gene_cutoff <- 300
+umi_cutoff <-  500
+mito_cutoff <- 10
+for (sample in samples){
+  scrna.list[[sample]] <- subset(scrna.list[[sample]], subset = nCount_RNA > umi_cutoff & nFeature_RNA > gene_cutoff & percent.mito < mito_cutoff )
+}
+
+
+### patient 002 ####
+
+sample <- "MGHSCLC002"
+
+scrna.002 <- scrna.list[["MGHSCLC002"]]
+
+## get annotation and doublet from pooled data
+
+scrna.002 <- RenameCells(scrna.002,new.names = paste0("MGHSCLC002_",colnames(scrna.002)))
+
+
+idx <- match(colnames(scrna.002),colnames(scrna.unintegrated))
+
+scrna.002$anno <- scrna.unintegrated$final_anno[idx]
+scrna.002$doublet <- scrna.unintegrated$doublet[idx]
+
+
+scrna.002 <- NormalizeData(scrna.002)
+scrna.002 <- FindVariableFeatures(scrna.002)
+scrna.002 <- ScaleData(scrna.002,vars.to.regress = c("percent.mito"))
+scrna.002 <- RunPCA(scrna.002, npcs = 30, verbose = F)
+
+scrna.002 <- FindNeighbors(scrna.002, reduction = "pca", dims = 1:30)
+scrna.002 <- FindClusters(scrna.002, resolution = 0.8)
+
+scrna.002 <- RunUMAP(scrna.002, reduction = "pca",dims = 1:30, reduction.name = "umap")
+
+
+DimPlot(
+  scrna.002,
+  reduction = "umap",
+  label.size = 6,
+  label=TRUE
+) #+ theme(legend.position = "none")
+
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_unintegration_UMAP_by_clusters.pdf")))
+
+
+DimPlot(
+  scrna.002,
+  reduction = "umap",
+  group.by="doublet",
+  combine = FALSE, label.size = 2
+) 
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_unintegration_UMAP_by_doublet.pdf")))
+
+
+DimPlot(
+  scrna.002,
+  reduction = "umap",
+  group.by="anno",
+  combine = FALSE, label.size = 2
+) 
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_unintegration_UMAP_by_pooled_anno.pdf")))
+
+
+
+## check epithelial
+
+FeaturePlot(scrna.002, features = c("EPCAM","KRT8","KRT18","KRT19"))
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_epithelial_markers_cluster.pdf"))
+
+## SCLC genes
+
+FeaturePlot(scrna.002, features = c("ASCL1","NEUROD1","POU2F3","YAP1","DLL3","SEZ6","CD276"))
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_SCLC_gene_cluster.pdf"))
+
+
+## monocyte
+
+FeaturePlot(scrna.002, features = c("LYZ","CD14","FCGR3A","CD68"),label=TRUE)
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_monocyte_markers_cluster.pdf"))
+
+## neutrophil
+
+FeaturePlot(scrna.002, features = c("S100A8","S100A9","FCGR3B","CSF3R"),label=TRUE)
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_neutrophil_markers_cluster.pdf"))
+
+
+## T cell
+
+FeaturePlot(scrna.002, features = c("CD3D","CD3E","CD4","CD8A"),label=TRUE)
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_T_markers_cluster.pdf"))
+
+
+## NK cell
+
+FeaturePlot(scrna.002, features = c("NKG7","KLRD1","GNLY","FCGR3A"),label=TRUE)
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_NK_markers_cluster.pdf"))
+
+## B cell
+
+FeaturePlot(scrna.002, features = c("CD19","MS4A1","CD79A","MZB1"),label=TRUE)
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_B_markers_cluster.pdf"))
+
+# Platelets
+FeaturePlot(scrna.002, features = c("PPBP", "PF4", "ITGA2B", "TUBB1"),label=TRUE)
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_Platelets_markers_cluster.pdf"))
+
+
+###T,B,Myeloid,Endothelial
+
+FeaturePlot(scrna.002, features = c("CD79A","MZB1","S100A8","FCGR3B","CD3D","VWF"))
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_mixture_markers_cluster.pdf"))
+
+### finalize annotation
+
+# Rename all identities
+scrna.002 <- RenameIdents(object = scrna.002, 
+                                  "0"="platelet",
+                                  "1"="platelet",
+                                  "2"="platelet",
+                                  "3"="platelet",
+                                  "4"="platelet",
+                                  "5"="platelet",
+                                  "6"="endothelial",
+                                  "7"="platelet",
+                                  "8"="platelet",
+                                  "9"="platelet",
+                                  "10"="myeloid",
+                                  "11"="B",
+                                  "12"="T",
+                                  "13"="platelet",
+                                  "14"="myeloid",
+                                  "15"="epithelial",
+                                  "16"="myeloid")
+
+
+scrna.002$final_anno <- scrna.002@active.ident
+
+DimPlot(
+  scrna.002,
+  reduction = "umap",
+  group.by = "final_anno",
+  combine = FALSE, label.size = 4
+  #cols=c("Neutrophil"="#C77CFF","Monocyte"="#008FC4","CD4"="#FF61CC","NK"="#FF3300","CD8"="#00C19A","Mast"="#0033FF","Platelet"="#E68613")
+)
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_by_final_anno.pdf"))
+
+
+
+# Save integrated seurat object with annotation
+saveRDS(scrna.002, paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.with.anno.rds"))
+
+
+scrna.002<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.with.anno.rds"))
+                             
+dir.create("../results/MGHSCLC002031036037/inferCNV/002/inputs",,recursive =TRUE)
+
+## download gene order file from 
+## /data/rama/labMembers/mao20/reference/hg38_gencode_v27.txt"
+
+##Input 2: count matrix
+
+epi_sub <- subset(scrna.002,subset=final_anno %in% c("platelet","endothelial","myeloid","T","B","epithelial"))
+
+## subset
+
+counts <- epi_sub@assays$RNA@layers$counts
+
+rownames(counts) <- rownames(epi_sub)
+colnames(counts) <- colnames(epi_sub)
+
+## input 3: sample annotation file
+
+
+annotation <- as.data.frame(epi_sub@meta.data[,c("final_anno","sample")])
+
+annotation <- annotation[1]
+
+write.table(annotation, file="../results/MGHSCLC002031036037/inferCNV/002/inputs/singleCell.annotation.txt",quote=FALSE,col.names = FALSE,row.names=TRUE,sep="\t")
+
+ 
+# create the infercnv object
+infercnv_obj = CreateInfercnvObject(raw_counts_matrix=counts,
+                                    annotations_file="../results/MGHSCLC002031036037/inferCNV/002/inputs/singleCell.annotation.txt",
+                                    delim="\t",
+                                    gene_order_file="/Volumes/rama/labMembers/mao20/reference/hg38_gencode_v27.txt",
+                                    chr_exclude = c("chrX","chrY","chrM"),
+                                    ref_group_names=c("platelet","endothelial","myeloid","T","B"))
+
+options(scipen = 100)
+# perform infercnv operations to reveal cnv signal
+infercnv_obj = infercnv::run(infercnv_obj,
+                             cutoff=0.1,  # use 1 for smart-seq, 0.1 for 10x-genomics
+                             out_dir="../results/MGHSCLC002031036037/inferCNV/002/output",  # dir is auto-created for storing outputs
+                             cluster_by_groups=T,   # cluster
+                             analysis_mode= "samples",
+                             denoise=T,
+                             HMM=T,
+                             num_threads=4,
+                             output_format = "pdf"
+                             )   
+
+
+### visualize CNV score on UMAP
+
+infercnv_obj = readRDS("../results/MGHSCLC002031036037/inferCNV/002/output/run.final.infercnv_obj")
+
+### centered at 1
+cnv <- infercnv_obj@expr.data -1 ## make it centered at 0
+
+cnv_score <- colSums(abs(cnv))
+
+## get index of subset in whole object
+
+idx <- match(colnames(cnv),colnames(scrna.002))
+
+scrna.002$totCNV <- 0
+
+scrna.002$totCNV[idx] <- cnv_score
+
+
+FeaturePlot(scrna.002,features="totCNV",col=c("lightgrey","red"),label=TRUE)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_totCNV_allin.pdf")))
+VlnPlot(scrna.002,features="totCNV",group.by="final_anno")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_Violin_totCNV_allin.pdf")))
+
+cnv_sd <- apply(abs(cnv),2,sd)
+
+scrna.002$sdCNV <- 0
+
+scrna.002$sdCNV[idx] <- cnv_sd
+FeaturePlot(scrna.002,features="sdCNV",col=c("lightgrey","red"),label=TRUE)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_sdCNV_allin.pdf")))
+VlnPlot(scrna.002,features="sdCNV",group.by="final_anno")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_Violin_sdCNV_allin.pdf")))
+
+saveRDS(scrna.002, paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.final.rds"))
+
+
+scrna.002<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.final.rds"))
+
+epi_sub <- subset(scrna.002,subset=final_anno=="epithelial")
+
+
+data <- FetchData(epi_sub, vars = c(c("PTPRC","EPCAM","DLL3","SEZ6","CD276"), "sample"))
+
+EPCAM_pos <- WhichCells(epi_sub, expression=EPCAM>0)
+SEZ6_pos <- WhichCells(epi_sub, expression=SEZ6 > 0)
+B7H3_pos <- WhichCells(epi_sub, expression=CD276 >0)
+#DLL3_pos <- WhichCells(epi_sub, expression=DLL3 >0)  
+## there are 4 DLL3+ (with 1-2 reads) but assigned as platelets
+#cells <- c("MGHSCLC002_AATGGCAGTCAGCGAG-1","MGHSCLC002_GTGGTTATCATGTGCA-1", "MGHSCLC002_GTTCCCGCATGCTCCG-1", "MGHSCLC002_TAGCATTAGCCCTGGA-1")
+
+## "MGHSCLC002_GTTCCCGCATGCTCCG-1" fall into epithelial cluster but assigned as platelet; this cell also express EPCAM and ASCL1, while the other three cells do not express these two genes; maybe platelet-coated CTCs with a mesenchymal phenotype and exhibit increased resistance to immune cell killing, and the first cell does express VIM.
+
+## reassign "MGHSCLC002_GTTCCCGCATGCTCCG-1 to epithelial
+
+
+scrna.002$final_anno["MGHSCLC002_GTTCCCGCATGCTCCG-1"] <- "epithelial"
+
+DimPlot(
+  scrna.002,
+  reduction = "umap",
+  group.by = "final_anno",
+  combine = FALSE, label.size = 4
+  #cols=c("Neutrophil"="#C77CFF","Monocyte"="#008FC4","CD4"="#FF61CC","NK"="#FF3300","CD8"="#00C19A","Mast"="#0033FF","Platelet"="#E68613")
+)
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_by_final_anno.pdf"))
+
+
+
+saveRDS(scrna.002, paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.final.rds"))
+
+
+scrna.002<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.final.rds"))
+
+epi_sub <- subset(scrna.002,subset=final_anno=="epithelial")
+
+
+data <- FetchData(epi_sub, vars = c(c("PTPRC","EPCAM","DLL3","SEZ6","CD276"), "sample"))
+
+EPCAM_pos <- WhichCells(epi_sub, expression=EPCAM>0)
+SEZ6_pos <- WhichCells(epi_sub, expression=SEZ6 > 0)
+B7H3_pos <- WhichCells(epi_sub, expression=CD276 >0)
+DLL3_pos <- WhichCells(epi_sub, expression=DLL3 >0) 
+
+a <- list(`DLL3+`=DLL3_pos,`SEZ6+`=SEZ6_pos,`B7H3+`=B7H3_pos)
+  
+p <- plot(euler(a, shape = "ellipse",main=st), quantities = TRUE)
+g <- grid.arrange(grobs=list(p),top="MGHSCLC002")
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_venn_SEZ6_EPCAM_B7H3_euler.pdf")),g)
+
+### expression over multiple cells
+
+data1 <- FetchData(epi_sub, vars = c("PTPRC","EPCAM","DLL3","SEZ6","CD276","ASCL1","POU2F3","YAP1","NEUROD1","CHGA", "NCAM1", "SYP","INSM1"))
+
+data2 <- ifelse(data1>0,1,0)
+
+## use UpSetR: https://cran.r-project.org/web/packages/UpSetR/vignettes/basic.usage.html
+
+data3 <- data2[,which(colSums(data2)>0)]
+
+pdf(file=paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_upset_mixture.pdf"),onefile=FALSE)
+upset(as.data.frame(data3),nset=50,order.by = "freq")
+
+dev.off()
+
+write.xlsx(data1,paste0("../results/MGHSCLC002031036037/text/",Sys.Date(),"_MGHSCLC002_targets_breakdown_in_tumor.xlsx"),rowNames=TRUE)
+
+## new malignant likely false: c("MGHSCLC002_AGCGGTTTCGAATGGG-1","MGHSCLC002_ATTCTCATCTGGTAAT-1","MGHSCLC002_TCTATTGTCCTGTGCC-1","MGHSCLC002_TGTGCATGTAGTGTCT-1")
+
+## new malignant likely real: c("MGHSCLC002_GTTCCCGCATGCTCCG-1")
+
+## change those four false ones to platelet
+
+scrna.002$final_anno[c("MGHSCLC002_AGCGGTTTCGAATGGG-1","MGHSCLC002_ATTCTCATCTGGTAAT-1","MGHSCLC002_TCTATTGTCCTGTGCC-1","MGHSCLC002_TGTGCATGTAGTGTCT-1")] <- "platelet"
+
+DimPlot(
+  scrna.002,
+  reduction = "umap",
+  group.by = "final_anno",
+  combine = FALSE, label.size = 4
+  #cols=c("Neutrophil"="#C77CFF","Monocyte"="#008FC4","CD4"="#FF61CC","NK"="#FF3300","CD8"="#00C19A","Mast"="#0033FF","Platelet"="#E68613")
+)
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_by_final_anno.pdf"))
+
+saveRDS(scrna.002, paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.final.rds"))
+
+epi_sub <- subset(scrna.002,subset=final_anno=="epithelial")
+
+
+data <- FetchData(epi_sub, vars = c(c("PTPRC","EPCAM","DLL3","SEZ6","CD276"), "sample"))
+
+EPCAM_pos <- WhichCells(epi_sub, expression=EPCAM>0)
+SEZ6_pos <- WhichCells(epi_sub, expression=SEZ6 > 0)
+B7H3_pos <- WhichCells(epi_sub, expression=CD276 >0)
+DLL3_pos <- WhichCells(epi_sub, expression=DLL3 >0) 
+
+a <- list(`DLL3+`=DLL3_pos,`SEZ6+`=SEZ6_pos,`B7H3+`=B7H3_pos)
+  
+p <- plot(euler(a, shape = "ellipse",main=st), quantities = TRUE)
+g <- grid.arrange(grobs=list(p),top="MGHSCLC002")
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_venn_SEZ6_DLL3_B7H3_euler.pdf")),g)
+
+### expression over multiple cells
+
+data1 <- FetchData(epi_sub, vars = c("PTPRC","EPCAM","DLL3","SEZ6","CD276","ASCL1","POU2F3","YAP1","NEUROD1","CHGA", "NCAM1", "SYP","INSM1"))
+
+data2 <- ifelse(data1>0,1,0)
+
+## use UpSetR: https://cran.r-project.org/web/packages/UpSetR/vignettes/basic.usage.html
+
+data3 <- data2[,which(colSums(data2)>0)]
+
+pdf(file=paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_upset_mixture.pdf"),onefile=FALSE)
+upset(as.data.frame(data3),nset=50,order.by = "freq")
+
+dev.off()
+
+write.xlsx(data1,paste0("../results/MGHSCLC002031036037/text/",Sys.Date(),"_MGHSCLC002_targets_breakdown_in_tumor.xlsx"),rowNames=TRUE)
+
+
+
+
+### check the likely CTCs cloaked with platelets
+sample <- "MGHSCLC002"
+
+scrna.002<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.final.rds"))
+
+FeaturePlot(scrna.002,features=c("VIM","SNAIL1","TWIST","CDH1"))
+
+### not much VIM expression
+
+## check annotations from the previous version
+scrna.002.run1<- readRDS("../results/MGHSCLC002/Rdata/scrna.seurat.with.singleR.anno.rds")
+
+cells <- c("MGHSCLC002_AATGGCAGTCAGCGAG-1","MGHSCLC002_GTGGTTATCATGTGCA-1", "MGHSCLC002_GTTCCCGCATGCTCCG-1", "MGHSCLC002_TAGCATTAGCCCTGGA-1")
+
+cells <- gsub("MGHSCLC002_","",cells)
+
+scrna.002.run1$final_anno[cells]
+
+# no DLL3 expression in previous run but got two reads this time in MGHSCLC002_GTTCCCGCATGCTCCG-1
+
+## 
+
+sample <- "MGHSCLC002"
+
+scrna.002<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.final.rds"))
+
+### bring back those EPCAM+ non-epithelial cells
+
+epi.pos <- which(scrna.002@assays$RNA$counts["EPCAM",]>0)
+
+cells <- setdiff(epi.pos,which(scrna.002$final_anno=="epithelial"))
+
+
+### check target expression in these cells
+
+data1 <- FetchData(scrna.002, vars = c("PTPRC","EPCAM","DLL3","SEZ6","CD276","ASCL1","POU2F3","YAP1","NEUROD1","CHGA", "NCAM1", "SYP","INSM1"),cells=cells)
+
+## only EPCAM no other NE genes in 13 cells
+
+```
+
+
+## Step 6.3: 036
+
+```{r}
+## load pooled data
+
+scrna.unintegrated <-  readRDS(paste0("../results/MGHSCLC002031036037/Rdata/","scrna.unintegrated.seurat.withanno.rds"))
+
+## let's start with raw list before filtering
+
+samples <- c("MGHSCLC002","MGHSCLC031","MGHSCLC036","MGHSCLC037")
+
+scrna.list <- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/","scrna.list.raw.rds"))
+
+gene_cutoff <- 300
+umi_cutoff <-  500
+mito_cutoff <- 10
+for (sample in samples){
+  scrna.list[[sample]] <- subset(scrna.list[[sample]], subset = nCount_RNA > umi_cutoff & nFeature_RNA > gene_cutoff & percent.mito < mito_cutoff )
+}
+
+
+### patient 036 ####
+
+sample <- "MGHSCLC036"
+
+scrna.036 <- scrna.list[[sample]]
+
+## get annotation and doublet from pooled data
+
+scrna.036 <- RenameCells(scrna.036,new.names = paste0("MGHSCLC036_",colnames(scrna.036)))
+
+
+idx <- match(colnames(scrna.036),colnames(scrna.unintegrated))
+
+scrna.036$anno <- scrna.unintegrated$final_anno[idx]
+scrna.036$doublet <- scrna.unintegrated$doublet[idx]
+
+
+scrna.036 <- NormalizeData(scrna.036)
+scrna.036 <- FindVariableFeatures(scrna.036)
+scrna.036 <- ScaleData(scrna.036,vars.to.regress = c("percent.mito"))
+scrna.036 <- RunPCA(scrna.036, npcs = 30, verbose = F)
+
+scrna.036 <- FindNeighbors(scrna.036, reduction = "pca", dims = 1:30)
+scrna.036 <- FindClusters(scrna.036, resolution = 1.4)
+
+scrna.036 <- RunUMAP(scrna.036, reduction = "pca",dims = 1:30, reduction.name = "umap")
+
+
+DimPlot(
+  scrna.036,
+  reduction = "umap",
+  label.size = 6,
+  label=TRUE
+) #+ theme(legend.position = "none")
+
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_unintegration_UMAP_by_clusters.pdf")))
+
+
+DimPlot(
+  scrna.036,
+  reduction = "umap",
+  group.by="doublet",
+  combine = FALSE, label.size = 2
+) 
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_unintegration_UMAP_by_doublet.pdf")))
+
+
+DimPlot(
+  scrna.036,
+  reduction = "umap",
+  group.by="anno",
+  combine = FALSE, label.size = 2
+) 
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_unintegration_UMAP_by_pooled_anno.pdf")))
+
+### strategy: use clustering results first, expand to EpCAM+ cells in non-epithelial cluster
+
+## check epithelial
+
+FeaturePlot(scrna.036, features = c("EPCAM","KRT8","KRT18","KRT19"))
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_epithelial_markers_cluster.pdf"))
+
+## SCLC genes
+
+FeaturePlot(scrna.036, features = c("ASCL1","NEUROD1","POU2F3","YAP1","DLL3","SEZ6","CD276"))
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_SCLC_gene_cluster.pdf"))
+
+
+## monocyte
+
+FeaturePlot(scrna.036, features = c("LYZ","CD14","FCGR3A","CD68"),label=TRUE)
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_monocyte_markers_cluster.pdf"))
+
+## neutrophil
+
+FeaturePlot(scrna.036, features = c("S100A8","S100A9","FCGR3B","CSF3R"),label=TRUE)
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_neutrophil_markers_cluster.pdf"))
+
+
+## T cell
+
+FeaturePlot(scrna.036, features = c("CD3D","CD3E","CD4","CD8A"),label=TRUE)
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_T_markers_cluster.pdf"))
+
+
+## NK cell
+
+FeaturePlot(scrna.036, features = c("NKG7","KLRD1","GNLY","FCGR3A"),label=TRUE)
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_NK_markers_cluster.pdf"))
+
+## B cell
+
+FeaturePlot(scrna.036, features = c("CD19","MS4A1","CD79A","MZB1"),label=TRUE)
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_B_markers_cluster.pdf"))
+
+# Platelets
+FeaturePlot(scrna.036, features = c("PPBP", "PF4", "ITGA2B", "TUBB1"),label=TRUE)
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_Platelets_markers_cluster.pdf"))
+
+
+###T,B,Myeloid,Endothelial
+
+FeaturePlot(scrna.036, features = c("CD79A","MZB1","S100A8","FCGR3B","CD3D","NKG7"))
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_mixture_markers_cluster.pdf"))
+
+
+FeaturePlot(scrna.036, features = c("VWF","PECAM1","COL1A1","COL3A1","FN1","EPCAM"))
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_mixture_markers_cluster_1.pdf"))
+
+
+### cluster 10
+
+cmarker <- FindMarkers(scrna.036,ident.1="unknown",ident.2="epithelial",logfc.threshold=0.25)
+
+cmarker %>% 
+  top_n(n = 20, 
+        wt = avg_log2FC)
+
+
+
+### finalize annotation
+Idents(scrna.036) <- "seurat_clusters"
+# Rename all identities
+scrna.036 <- RenameIdents(object = scrna.036, 
+                                  "0"="platelet",
+                                  "1"="platelet",
+                                  "2"="platelet",
+                                  "3"="platelet",
+                                  "4"="platelet",
+                                  "5"="platelet",
+                                  "6"="endothelial",
+                                  "7"="endothelial",
+                                  "8"="monocyte",
+                                  "9"="platelet",
+                                  "10"="unknown",
+                                  "11"="lymphocyte",
+                                  "12"="epithelial",
+                                  "13"="neutrophil",
+                                  "14"="fibroblast")
+
+
+scrna.036$final_anno <- scrna.036@active.ident
+
+### bring back those EPCAM+ non-epithelial cells
+
+epi.pos <- which(scrna.036@assays$RNA$counts["EPCAM",]>0)
+
+cells <- setdiff(epi.pos,which(scrna.036$seurat_clusters=="12"))
+
+
+### check target expression in these cells
+
+data1 <- FetchData(scrna.036, vars = c("PTPRC","EPCAM","DLL3","SEZ6","CD276","ASCL1","POU2F3","YAP1","NEUROD1","CHGA", "NCAM1", "SYP","INSM1"),cells=cells)
+
+## one cell "MGHSCLC036_GTGCATATCATCAGGC-1" express both EPCAM and DLL3
+
+scrna.036$final_anno["MGHSCLC036_GTGCATATCATCAGGC-1"] <- "epithelial"
+
+DimPlot(
+  scrna.036,
+  reduction = "umap",
+  group.by = "final_anno",
+  combine = FALSE, label.size = 4
+  #cols=c("Neutrophil"="#C77CFF","Monocyte"="#008FC4","CD4"="#FF61CC","NK"="#FF3300","CD8"="#00C19A","Mast"="#0033FF","Platelet"="#E68613")
+)
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_by_final_anno.pdf"))
+
+
+
+# Save integrated seurat object with annotation
+saveRDS(scrna.036, paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.with.anno.rds"))
+
+
+scrna.036<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.with.anno.rds"))
+                             
+dir.create("../results/MGHSCLC002031036037/inferCNV/036/inputs",,recursive =TRUE)
+
+## download gene order file from 
+## /data/rama/labMembers/mao20/reference/hg38_gencode_v27.txt"
+
+##Input 2: count matrix
+
+## subset
+
+counts <- scrna.036@assays$RNA@layers$counts
+
+rownames(counts) <- rownames(scrna.036)
+colnames(counts) <- colnames(scrna.036)
+
+## input 3: sample annotation file
+
+
+annotation <- as.data.frame(scrna.036@meta.data[,c("final_anno","sample")])
+
+annotation <- annotation[which(!annotation$final_anno %in% c("unknown","platelet")),]
+annotation <- annotation[1]
+
+write.table(annotation, file="../results/MGHSCLC002031036037/inferCNV/036/inputs/singleCell.annotation.txt",quote=FALSE,col.names = FALSE,row.names=TRUE,sep="\t")
+
+ 
+# create the infercnv object
+infercnv_obj = CreateInfercnvObject(raw_counts_matrix=counts,
+                                    annotations_file="../results/MGHSCLC002031036037/inferCNV/036/inputs/singleCell.annotation.txt",
+                                    delim="\t",
+                                    gene_order_file="/data/rama/labMembers/mao20/reference/hg38_gencode_v27.txt",
+                                    chr_exclude = c("chrX","chrY","chrM"),
+                                    ref_group_names=c("endothelial","monocyte","lymphocyte","neutrophil","fibroblast"))
+
+options(scipen = 100)
+# perform infercnv operations to reveal cnv signal
+infercnv_obj = infercnv::run(infercnv_obj,
+                             cutoff=0.1,  # use 1 for smart-seq, 0.1 for 10x-genomics
+                             out_dir="../results/MGHSCLC002031036037/inferCNV/036/output",  # dir is auto-created for storing outputs
+                             cluster_by_groups=T,   # cluster
+                             analysis_mode= "samples",
+                             denoise=T,
+                             HMM=T,
+                             num_threads=4,
+                             output_format = "pdf"
+                             )   
+
+
+### visualize CNV score on UMAP
+
+infercnv_obj = readRDS("../results/MGHSCLC002031036037/inferCNV/036/output/run.final.infercnv_obj")
+
+### centered at 1
+cnv <- infercnv_obj@expr.data -1 ## make it centered at 0
+
+cnv_score <- colSums(abs(cnv))
+
+## get index of subset in whole object
+
+idx <- match(colnames(cnv),colnames(scrna.036))
+
+scrna.036$totCNV <- 0
+
+scrna.036$totCNV[idx] <- cnv_score
+
+
+FeaturePlot(scrna.036,features="totCNV",col=c("lightgrey","red"),label=TRUE)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_totCNV_allin.pdf")))
+VlnPlot(scrna.036,features="totCNV",group.by="final_anno")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_Violin_totCNV_allin.pdf")))
+
+cnv_sd <- apply(abs(cnv),2,sd)
+
+scrna.036$sdCNV <- 0
+
+scrna.036$sdCNV[idx] <- cnv_sd
+FeaturePlot(scrna.036,features="sdCNV",col=c("lightgrey","red"),label=TRUE)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_sdCNV_allin.pdf")))
+VlnPlot(scrna.036,features="sdCNV",group.by="final_anno")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_Violin_sdCNV_allin.pdf")))
+
+saveRDS(scrna.036, paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.final.rds"))
+
+
+scrna.036<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.final.rds"))
+
+
+epi_sub <- subset(scrna.036,subset=final_anno=="epithelial")
+
+
+data <- FetchData(epi_sub, vars = c(c("PTPRC","EPCAM","DLL3","SEZ6","CD276"), "sample"))
+
+SEZ6_pos <- WhichCells(epi_sub, expression=SEZ6 > 0)
+B7H3_pos <- WhichCells(epi_sub, expression=CD276 >0)
+DLL3_pos <- WhichCells(epi_sub, expression=DLL3 >0) 
+
+a <- list(`DLL3+`=DLL3_pos,`SEZ6+`=SEZ6_pos,`B7H3+`=B7H3_pos)
+  
+p <- plot(euler(a, shape = "ellipse",main=st), quantities = TRUE)
+g <- grid.arrange(grobs=list(p),top="MGHSCLC036")
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_venn_SEZ6_DLL3_B7H3_euler.pdf")),g)
+
+### expression over multiple cells
+
+data1 <- FetchData(epi_sub, vars = c("PTPRC","EPCAM","DLL3","SEZ6","CD276","ASCL1","POU2F3","YAP1","NEUROD1","CHGA", "NCAM1", "SYP","INSM1"))
+
+data2 <- ifelse(data1>0,1,0)
+
+## use UpSetR: https://cran.r-project.org/web/packages/UpSetR/vignettes/basic.usage.html
+
+data3 <- data2[,which(colSums(data2)>0)]
+
+pdf(file=paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_upset_mixture.pdf"),onefile=FALSE)
+upset(as.data.frame(data3),nset=50,order.by = "freq")
+
+dev.off()
+
+write.xlsx(data1,paste0("../results/MGHSCLC002031036037/text/",Sys.Date(),"_",sample,"_targets_breakdown_in_tumor.xlsx"),rowNames=TRUE)
+
+colSums(data1>0)
+
+colSums(data1>0)/nrow(data1)
+
+```
+
+## Step 6.4: 037
+
+```{r}
+## load pooled data
+
+scrna.unintegrated <-  readRDS(paste0("../results/MGHSCLC002031036037/Rdata/","scrna.unintegrated.seurat.withanno.rds"))
+
+## let's start with raw list before filtering
+
+samples <- c("MGHSCLC002","MGHSCLC031","MGHSCLC036","MGHSCLC037")
+
+scrna.list <- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/","scrna.list.raw.rds"))
+
+gene_cutoff <- 300
+umi_cutoff <-  500
+mito_cutoff <- 10
+for (sample in samples){
+  scrna.list[[sample]] <- subset(scrna.list[[sample]], subset = nCount_RNA > umi_cutoff & nFeature_RNA > gene_cutoff & percent.mito < mito_cutoff )
+}
+
+
+### patient 037 ####
+
+sample <- "MGHSCLC037"
+
+scrna.037 <- scrna.list[[sample]]
+
+## get annotation and doublet from pooled data
+
+scrna.037 <- RenameCells(scrna.037,new.names = paste0("MGHSCLC037_",colnames(scrna.037)))
+
+
+idx <- match(colnames(scrna.037),colnames(scrna.unintegrated))
+
+scrna.037$anno <- scrna.unintegrated$final_anno[idx]
+scrna.037$doublet <- scrna.unintegrated$doublet[idx]
+
+### anno is from annotation in pooled data; final_anno is the annotation based on individual analysis; final_anno2 is what used in downsample pooled data
+
+
+scrna.037 <- NormalizeData(scrna.037)
+scrna.037 <- FindVariableFeatures(scrna.037)
+scrna.037 <- ScaleData(scrna.037,vars.to.regress = c("percent.mito"))
+scrna.037 <- RunPCA(scrna.037, npcs = 30, verbose = F)
+
+scrna.037 <- FindNeighbors(scrna.037, reduction = "pca", dims = 1:30)
+scrna.037 <- FindClusters(scrna.037, resolution = 0.1)
+
+scrna.037 <- RunUMAP(scrna.037, reduction = "pca",dims = 1:30, reduction.name = "umap")
+
+
+DimPlot(
+  scrna.037,
+  reduction = "umap",
+  label.size = 6,
+  label=TRUE
+) #+ theme(legend.position = "none")
+
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_unintegration_UMAP_by_clusters.pdf")))
+
+
+DimPlot(
+  scrna.037,
+  reduction = "umap",
+  group.by="doublet",
+  combine = FALSE, label.size = 2
+) 
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_unintegration_UMAP_by_doublet.pdf")))
+
+
+DimPlot(
+  scrna.037,
+  reduction = "umap",
+  group.by="anno",
+  combine = FALSE, label.size = 2
+) 
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_unintegration_UMAP_by_pooled_anno.pdf")))
+
+### strategy: use clustering results first, expand to EpCAM+ cells in non-epithelial cluster
+
+## check epithelial
+
+FeaturePlot(scrna.037, features = c("EPCAM","KRT8","KRT18","KRT19"))
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_epithelial_markers_cluster.pdf"))
+
+## SCLC genes
+
+FeaturePlot(scrna.037, features = c("ASCL1","NEUROD1","POU2F3","YAP1","DLL3","SEZ6","CD276"))
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_SCLC_gene_cluster.pdf"))
+
+
+## monocyte
+
+FeaturePlot(scrna.037, features = c("LYZ","CD14","FCGR3A","CD68"),label=TRUE)
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_monocyte_markers_cluster.pdf"))
+
+## neutrophil
+
+FeaturePlot(scrna.037, features = c("S100A8","S100A9","FCGR3B","CSF3R"),label=TRUE)
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_neutrophil_markers_cluster.pdf"))
+
+
+## T cell
+
+FeaturePlot(scrna.037, features = c("CD3D","CD3E","CD4","CD8A"),label=TRUE)
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_T_markers_cluster.pdf"))
+
+
+## NK cell
+
+FeaturePlot(scrna.037, features = c("NKG7","KLRD1","GNLY","FCGR3A"),label=TRUE)
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_NK_markers_cluster.pdf"))
+
+## B cell
+
+FeaturePlot(scrna.037, features = c("CD19","MS4A1","CD79A","MZB1"),label=TRUE)
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_B_markers_cluster.pdf"))
+
+# Platelets
+FeaturePlot(scrna.037, features = c("PPBP", "PF4", "ITGA2B", "TUBB1"),label=TRUE)
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_Platelets_markers_cluster.pdf"))
+
+
+
+
+###T,B,Myeloid,Endothelial
+
+FeaturePlot(scrna.037, features = c("CD79A","S100A8","FCGR3B","CD3D","NKG7","PLD4"))
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_mixture_markers_cluster.pdf"))
+
+
+FeaturePlot(scrna.037, features = c("VWF","PECAM1","HBB","HBA1"))
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_mixture_markers_cluster_1.pdf"))
+
+
+
+
+### finalize annotation
+
+# Rename all identities
+scrna.037 <- RenameIdents(object = scrna.037, 
+                                  "0"="platelet",
+                                  "1"="neutrophil",
+                                  "2"="mast",
+                                  "3"="epithelial",
+                                  "4"="RBC",
+                                  "5"="T",
+                                  "6"="endothelial",
+                                  "7"="NK",
+                                  "8"="monocyte",
+                                  "9"="plasma",
+                                  "10"="B",
+                                  "11"="pDC"
+                                )
+
+
+scrna.037$final_anno <- scrna.037@active.ident
+
+### bring back those EPCAM+ non-epithelial cells
+
+epi.pos <- which(scrna.037@assays$RNA$counts["EPCAM",]>0)
+
+cells <- setdiff(epi.pos,which(scrna.037$seurat_clusters=="3"))
+
+
+### check target expression in these cells
+
+data1 <- FetchData(scrna.037, vars = c("PTPRC","EPCAM","DLL3","SEZ6","CD276","ASCL1","POU2F3","YAP1","NEUROD1","CHGA", "NCAM1", "SYP","INSM1"),cells=cells)
+
+## 149; majority express CD45 and EPCAM
+
+## one cell "MGHSCLC037_GCATCAATCCGCCATC-1" express both EPCAM and ASCL1
+
+scrna.037$final_anno["MGHSCLC037_GCATCAATCCGCCATC-1"] <- "epithelial"
+
+## this might bring more false epithelial cells than true
+
+DimPlot(
+  scrna.037,
+  reduction = "umap",
+  group.by = "final_anno",
+  combine = FALSE, label.size = 4
+  #cols=c("Neutrophil"="#C77CFF","Monocyte"="#008FC4","CD4"="#FF61CC","NK"="#FF3300","CD8"="#00C19A","Mast"="#0033FF","Platelet"="#E68613")
+)
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_by_final_anno.pdf"))
+
+
+
+# Save integrated seurat object with annotation
+saveRDS(scrna.037, paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.with.anno.rds"))
+
+
+scrna.037<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.with.anno.rds"))
+
+## downsample to speed up infercnv
+
+scrna.037.down <- subset(scrna.037,downsample=2000)
+
+## exclude RBC
+
+scrna.037.down <- subset(scrna.037.down,subset=final_anno=="RBC",invert=TRUE)
+                             
+dir.create("../results/MGHSCLC002031036037/inferCNV/037/inputs",,recursive =TRUE)
+
+## download gene order file from 
+## /data/rama/labMembers/mao20/reference/hg38_gencode_v27.txt"
+
+##Input 2: count matrix
+
+## subset
+
+counts <- scrna.037.down@assays$RNA@layers$counts
+
+rownames(counts) <- rownames(scrna.037.down)
+colnames(counts) <- colnames(scrna.037.down)
+
+## input 3: sample annotation file
+
+
+annotation <- as.data.frame(scrna.037.down@meta.data[,c("final_anno","sample")])
+
+annotation <- annotation[1]
+
+write.table(annotation, file="../results/MGHSCLC002031036037/inferCNV/037/inputs/singleCell.annotation.txt",quote=FALSE,col.names = FALSE,row.names=TRUE,sep="\t")
+
+ 
+# create the infercnv object
+infercnv_obj = CreateInfercnvObject(raw_counts_matrix=counts,
+                                    annotations_file="../results/MGHSCLC002031036037/inferCNV/037/inputs/singleCell.annotation.txt",
+                                    delim="\t",
+                                    gene_order_file="/Volumes/rama/labMembers/mao20/reference/hg38_gencode_v27.txt",
+                                    chr_exclude = c("chrX","chrY","chrM"),
+                                    ref_group_names=c("platelet","endothelial","monocyte","T","neutrophil","NK","mast","B","plasma","pDC"))
+
+options(scipen = 100)
+# perform infercnv operations to reveal cnv signal
+infercnv_obj = infercnv::run(infercnv_obj,
+                             cutoff=0.1,  # use 1 for smart-seq, 0.1 for 10x-genomics
+                             out_dir="../results/MGHSCLC002031036037/inferCNV/037/output",  # dir is auto-created for storing outputs
+                             cluster_by_groups=T,   # cluster
+                             analysis_mode= "samples",
+                             denoise=T,
+                             HMM=T,
+                             num_threads=4,
+                             output_format = "pdf"
+                             )   
+
+
+### visualize CNV score on UMAP
+
+infercnv_obj = readRDS("../results/MGHSCLC002031036037/inferCNV/037/output/run.final.infercnv_obj")
+
+### centered at 1
+cnv <- infercnv_obj@expr.data -1 ## make it centered at 0
+
+cnv_score <- colSums(abs(cnv))
+
+## get index of subset in whole object
+
+idx <- match(colnames(cnv),colnames(scrna.037.down))
+
+scrna.037.down$totCNV <- 0
+
+scrna.037.down$totCNV[idx] <- cnv_score
+
+
+FeaturePlot(scrna.037.down,features="totCNV",col=c("lightgrey","red"),label=TRUE)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_totCNV_allin.pdf")))
+VlnPlot(scrna.037.down,features="totCNV",group.by="final_anno",pt.size=0)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_Violin_totCNV_allin.pdf")))
+
+cnv_sd <- apply(abs(cnv),2,sd)
+
+scrna.037.down$sdCNV <- 0
+
+scrna.037.down$sdCNV[idx] <- cnv_sd
+FeaturePlot(scrna.037.down,features="sdCNV",col=c("lightgrey","red"),label=TRUE)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_UMAP_sdCNV_allin.pdf")))
+VlnPlot(scrna.037.down,features="sdCNV",group.by="final_anno",pt.size=0)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_Violin_sdCNV_allin.pdf")))
+
+saveRDS(scrna.037.down, paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.final.downsample2000.rds"))
+
+
+scrna.037.down<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/",sample,".scrna.seurat.final.downsample2000.rds"))
+
+
+epi_sub <- subset(scrna.037,subset=final_anno=="epithelial")
+
+
+data <- FetchData(epi_sub, vars = c(c("PTPRC","EPCAM","DLL3","SEZ6","CD276"), "sample"))
+
+SEZ6_pos <- WhichCells(epi_sub, expression=SEZ6 > 0)
+B7H3_pos <- WhichCells(epi_sub, expression=CD276 >0)
+DLL3_pos <- WhichCells(epi_sub, expression=DLL3 >0) 
+
+a <- list(`DLL3+`=DLL3_pos,`SEZ6+`=SEZ6_pos,`B7H3+`=B7H3_pos)
+  
+p <- plot(euler(a, shape = "ellipse",main=st), quantities = TRUE)
+g <- grid.arrange(grobs=list(p),top="MGHSCLC037")
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_venn_SEZ6_DLL3_B7H3_euler.pdf")),g)
+
+### expression over multiple cells
+
+data1 <- FetchData(epi_sub, vars = c("PTPRC","EPCAM","DLL3","SEZ6","CD276","ASCL1","POU2F3","YAP1","NEUROD1","CHGA", "NCAM1", "SYP","INSM1"))
+
+data2 <- ifelse(data1>0,1,0)
+
+## use UpSetR: https://cran.r-project.org/web/packages/UpSetR/vignettes/basic.usage.html
+
+data3 <- data2[,which(colSums(data2)>0)]
+
+pdf(file=paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_",sample,"_upset_mixture.pdf"),onefile=FALSE)
+upset(as.data.frame(data3),nset=50,order.by = "freq")
+
+dev.off()
+
+write.xlsx(data1,paste0("../results/MGHSCLC002031036037/text/",Sys.Date(),"_",sample,"_targets_breakdown_in_tumor.xlsx"),rowNames=TRUE)
+
+colSums(data1>0)
+
+colSums(data1>0)/nrow(data1)
+
+```
+
+## Step 6.5: pool three samples together
+
+```{r}
+### load 002
+
+scrna.002<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC002.scrna.seurat.final.rds"))
+
+### load 036
+
+scrna.036<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC036.scrna.seurat.final.rds"))
+
+### load 037
+
+scrna.037<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC037.scrna.seurat.with.anno.rds"))
+
+scrna.obj <- merge(x=scrna.002,y=c(scrna.036,scrna.037))
+
+## 
+
+scrna.obj <- NormalizeData(scrna.obj)
+scrna.obj <- FindVariableFeatures(scrna.obj)
+scrna.obj <- ScaleData(scrna.obj,vars.to.regress = c("percent.mito"))
+scrna.obj <- RunPCA(scrna.obj, npcs = 30, verbose = F)
+
+scrna.obj <- FindNeighbors(scrna.obj, reduction = "pca", dims = 1:30)
+scrna.obj <- FindClusters(scrna.obj, resolution = 0.8)
+
+scrna.obj <- RunUMAP(scrna.obj, reduction = "pca",dims = 1:30, reduction.name = "umap")
+
+
+DimPlot(
+  scrna.obj,
+  reduction = "umap",
+  combine = FALSE, label.size = 6, 
+  label=TRUE
+)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_cluster_3sample.pdf")))
+
+
+DimPlot(
+  scrna.obj,
+  reduction = "umap",
+  group.by = "sample",
+  combine = FALSE, label.size = 6
+)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_sample_3sample.pdf")))
+
+DimPlot(
+  scrna.obj,
+  reduction = "umap",
+  group.by="final_anno",
+  combine = FALSE, label.size = 6, 
+  label=TRUE
+)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_raw_anno_from_individual_3sample.pdf")))
+
+
+
+
+scrna.obj <- JoinLayers(scrna.obj)
+
+## check top markers
+
+relaxed.markers <- FindAllMarkers(scrna.obj,logfc.threshold=0.25)
+
+# Extract top 10 markers per cluster
+
+top20 <- relaxed.markers %>% 
+  group_by(cluster) %>% 
+  top_n(n = 20, 
+        wt = avg_log2FC)
+
+
+write.xlsx(top20,paste0("../results/MGHSCLC002031036037/text/",Sys.Date(),"_top20_relaxed_marker_genes_per_cluster_res0.8_3sample.xlsx"))
+
+
+## epithelial
+
+FeaturePlot(scrna.obj,features=c("EPCAM","DLL3","SEZ6","ASCL1"))
+
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_epithelial_SCLC_3sample.pdf")))
+
+### myeloid
+
+FeaturePlot(scrna.obj,features=c("CD14","FCGR3A","CD68","FCGR3B","S100A8","FCGR1A"))
+
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_myeloid_marker_1_3sample.pdf")))
+
+
+FeaturePlot(scrna.obj,features=c("KIT","CPA3","CEACAM8","ITGAM"))
+
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_myeloid_marker_1_3sample.pdf")))
+## 
+
+topgenes <- c("HBA1","HBB","MS4A1","CD79A","CD3E","CD3D","NCAM1","CD83","NEUROD1","EPCAM","CD14","VWF","ITGA2B","PF4","PPBP","FCER1A","CPA3","S100A8", "S100A9", "FCGR3B")
+
+FeaturePlot(scrna.obj,features=topgenes)
+
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_mixture_marker_3sample.pdf")))
+
+
+## MEP
+
+FeaturePlot(scrna.obj,features=c("CD34","CD38"))
+
+
+## check phase
+
+
+load("/Volumes/rama/labMembers/mao20/reference/cycle.rda")
+
+# Score cells for cell cycle
+scrna.obj <-CellCycleScoring(scrna.obj, 
+                                 g2m.features = g2m_genes, 
+                                 s.features = s_genes)
+
+
+DimPlot(
+  scrna.obj,
+  reduction = "umap",
+  group.by = "Phase",
+  combine = FALSE, label.size = 6
+)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_phase_3sample.pdf")))
+
+saveRDS(scrna.obj, paste0("../results/MGHSCLC002031036037/Rdata/","scrna.obj.seurat.3sample.rds"))
+
+
+## get singleR annotation
+
+ref.se <- celldex::HumanPrimaryCellAtlasData()
+
+####get raw counts
+counts <- scrna.obj@assays$RNA$counts
+
+human.main <- SingleR(test = counts,assay.type.test = 1,ref = ref.se,labels = ref.se$label.main)
+
+# add annotation to seurat
+
+###add annotation to meta.data
+types <- human.main$labels
+
+names(types) <- rownames(human.main)
+scrna.obj <- AddMetaData(object = scrna.obj, metadata = types,col.name="singleRanno")
+
+
+
+# Rename all identities
+scrna.obj <- RenameIdents(object = scrna.obj, 
+                                  "0"="neutrophil",
+                                  "1"="platelet",
+                                  "2"="neutrophil",
+                                  "3"="platelet",
+                                  "4"="platelet",
+                                  "5"="platelet",
+                                  "6"="mast",
+                                  "7"="platelet",
+                                  "8"="platelet",
+                                  "9"="endothelial",
+                                  "10"="platelet",
+                                  "11"="unknown",
+                                  "12"="epithelial",
+                                  "13"="epithelial",
+                                  "14"="platelet",
+                                  "15"="RBC",
+                                  "16"="epithelial",
+                                  "17"="monocyte",
+                                  "18"="T",
+                                  "19"="epithelial",
+                                  "20"="platelet",
+                                  "21"="NK",
+                                  "22"="plasma",
+                                  "23"="B",
+                                  "24"="pDC")
+
+scrna.obj$final_anno2 <- scrna.obj@active.ident
+
+DimPlot(
+  scrna.obj,
+  reduction = "umap",
+  group.by = "final_anno2",
+  label.size = 4,
+  label=TRUE,
+  cols=c("neutrophil"="#7CAE00","platelet"="#ABA300","mast"="#C77CFF","monocyte"="#008FC4","B"="#FF61CC","pDC"="#8494FF","T"="#00C19A","plasma"="#E68613","unknown"="#9999CC","epithelial"="#FF3300","endothelial"="#99CCCC","NK"="#FF3399","RBC"="#00FF00")) + theme(legend.position = "none")
+
+ggsave(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_unintegrated_UMAP_by_final_anno_3sample.pdf"))
+
+
+# Save object
+saveRDS(scrna.obj, paste0("../results/MGHSCLC002031036037/Rdata/","scrna.obj.seurat.withanno.3sample.rds"))
+
+
+```
+
+##Step 6.6: GSEA
+
+```{r}
+
+## get malignant cells from pooled data
+
+scrna.obj <- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/","scrna.obj.seurat.withanno.3sample.rds"))
+
+
+tcells <- WhichCells(scrna.obj,expression=final_anno=="epithelial")
+
+epi_sub <- subset(scrna.obj,cells=tcells)
+
+#1. What is the single cell distribution of DLL3, SEZ6, B7H3 among the different histological types of SCLC (from primary tumor) or among CTCs (from our own 10X data)
+### get stacked bar for pos vs negative for three targets
+
+## DLL3
+## DLL3 pos vs neg
+epi_sub$DLL3_group <- "neg"
+ 
+epi_sub$DLL3_group[which(epi_sub[['RNA']]$data["DLL3",] > 0)] <- "pos" 
+epi_sub$DLL3_group <- factor(epi_sub$DLL3_group)
+
+
+### plot fraction of DLL3+ DLL3-
+
+###plot stackedbar for subtype per sample
+
+samType <- as.data.frame(table(epi_sub$sample,epi_sub$DLL3_group))
+colnames(samType) <- c("Sample","DLL3","Freq")
+samType$Value <- samType$Freq / ave(samType$Freq, samType$Sample,FUN = sum) * 100
+
+ggplot(samType, aes(x = Sample, y = Value, fill = DLL3)) +
+   geom_bar(stat = "identity", position = "fill") +
+   #facet_wrap(~ CellType, scales = "free_x") +
+   scale_y_continuous(labels = scales::percent,expand = c(0, 0)) +
+   scale_x_discrete(expand = c(0, 0)) +
+   scale_fill_manual(values = c("pos" = "red", "neg" = "blue")) +
+   theme_bw() + theme(text = element_text(size = 8),axis.text.x = element_text(angle = 45,hjust = 1)) + 
+   labs(title = "DLL3 expression per sample", y = "Proportion", x = "Sample")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_stackedbar_by_DLL3_by_sample.pdf")))
+
+
+
+
+## SEZ6
+## SEZ6 pos vs neg
+epi_sub$SEZ6_group <- "neg"
+ 
+epi_sub$SEZ6_group[which(epi_sub[['RNA']]$data["SEZ6",] > 0)] <- "pos" 
+epi_sub$SEZ6_group <- factor(epi_sub$SEZ6_group)
+
+
+### plot fraction of SEZ6+ SEZ6-
+
+###plot stackedbar for subtype per sample
+
+samType <- as.data.frame(table(epi_sub$sample,epi_sub$SEZ6_group))
+colnames(samType) <- c("Sample","SEZ6","Freq")
+samType$Value <- samType$Freq / ave(samType$Freq, samType$Sample,FUN = sum) * 100
+
+
+ggplot(samType, aes(x = Sample, y = Value, fill = SEZ6)) +
+   geom_bar(stat = "identity", position = "fill") +
+   #facet_wrap(~ CellType, scales = "free_x") +
+   scale_y_continuous(labels = scales::percent,expand = c(0, 0)) +
+   scale_x_discrete(expand = c(0, 0)) +
+   scale_fill_manual(values = c("pos" = "red", "neg" = "blue")) +
+   theme_bw() + theme(text = element_text(size = 8),axis.text.x = element_text(angle = 45,hjust = 1)) + 
+   labs(title = "SEZ6 expression per sample", y = "Proportion", x = "Sample")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_stackedbar_by_SEZ6_by_sample.pdf")))
+
+
+## CD276
+## CD276 pos vs neg
+epi_sub$CD276_group <- "neg"
+ 
+epi_sub$CD276_group[which(epi_sub[['RNA']]$data["CD276",] > 0)] <- "pos" 
+epi_sub$CD276_group <- factor(epi_sub$CD276_group)
+
+
+### plot fraction of CD276+ CD276-
+
+###plot stackedbar for subtype per sample
+
+samType <- as.data.frame(table(epi_sub$sample,epi_sub$CD276_group))
+colnames(samType) <- c("Sample","B7H3","Freq")
+samType$Value <- samType$Freq / ave(samType$Freq, samType$Sample,FUN = sum) * 100
+
+
+ggplot(samType, aes(x = Sample, y = Value, fill = B7H3)) +
+   geom_bar(stat = "identity", position = "fill") +
+   #facet_wrap(~ CellType, scales = "free_x") +
+   scale_y_continuous(labels = scales::percent,expand = c(0, 0)) +
+   scale_x_discrete(expand = c(0, 0)) +
+   scale_fill_manual(values = c("pos" = "red", "neg" = "blue")) +
+   theme_bw() + theme(text = element_text(size = 8),axis.text.x = element_text(angle = 45,hjust = 1)) + 
+   labs(title = "B7H3 expression per sample", y = "Proportion", x = "Sample")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_stackedbar_by_CD276_by_sample.pdf")))
+
+#########
+#2. Ven diagram type analyses of DLL3, SEZ6, B7H3 expression patterns: how many cancer cells (primary tumor) and how many CTCs have one, two, all three or none…
+
+##kind of done
+
+########
+#3. Are there GSEA type patterns that identify DLL3, SEZ6, B7H3 expressing cells that differ in any way, or are they simply variants of a common neuroendocrine state within SCLC.
+
+### use triple negative as control
+
+#data1 <- FetchData(epi_sub, vars = c("PTPRC","EPCAM","DLL3","SEZ6","CD276","ASCL1","POU2F3","YAP1","NEUROD1","CHGA", "NCAM1", "SYP","INSM1"))
+
+data1 <- FetchData(epi_sub, vars = c("DLL3","SEZ6","CD276"))
+
+data2 <- ifelse(data1>0,1,0)
+
+## use UpSetR: https://cran.r-project.org/web/packages/UpSetR/vignettes/basic.usage.html
+
+data3 <- data2[,which(colSums(data2)>0)]
+
+##set default as triple negative
+epi_sub$group_gsea <- "triple_negative"
+
+### for DLL3+ only
+
+dll3.posOnly <- WhichCells(epi_sub, expression=DLL3_group=="pos" & SEZ6_group=="neg" & CD276_group=="neg")
+epi_sub$group_gsea[dll3.posOnly] <- "DLL3+Only"
+
+### for SEZ6+ only
+
+sez6.posOnly <- WhichCells(epi_sub, expression=DLL3_group=="neg" & SEZ6_group=="pos" & CD276_group=="neg")
+epi_sub$group_gsea[sez6.posOnly] <- "SEZ6+Only"
+
+### for CD276+ only
+cd276.posOnly <- WhichCells(epi_sub, expression=DLL3_group=="neg" & SEZ6_group=="neg" & CD276_group=="pos")
+epi_sub$group_gsea[cd276.posOnly] <- "B7H3+Only"
+
+## for coexpression of two or three
+
+epi_sub$group_gsea[which(rowSums(data2)>1)] <-"2or3+"
+
+saveRDS(epi_sub,paste0("../results/MGHSCLC002031036037/Rdata/","scrna.obj.seurat.withanno.3sample.tumorOnly.rds"))
+
+
+Idents(epi_sub) <- 'group_gsea'
+
+test.groups <- c("DLL3+Only","SEZ6+Only","B7H3+Only","2or3+")
+ctrl <- "triple_negative"
+for(group in test.groups){
+  case <- group
+  deg.markers <- FindMarkers(epi_sub, ident.1 = case, ident.2 = ctrl)
+  deg.markers$Gene <- rownames(deg.markers)
+  # add a column of NAs
+  deg.markers$diffexpressed <- "NO"
+  fcthresh <- 1.5
+  pthresh <- 0.05
+  # if avg_log2FC > FCthreshold and p_val_adj < pthreshold, set as "UP"
+  deg.markers$diffexpressed[deg.markers$avg_log2FC > log2(fcthresh) & deg.markers$p_val_adj < pthresh] <- "UP"
+  # if avg_log2FC < -FCthreshold and p_val_adj < pthreshold, set as "DOWN"
+  deg.markers$diffexpressed[deg.markers$avg_log2FC < -log2(fcthresh) & deg.markers$p_val_adj < pthresh] <- "DOWN"
+  # Create a new column "delabel" to de, that will contain the name of genes differentially expressed (NA in case they are not)
+  deg.markers$delabel <- NA
+  deg.markers$delabel[deg.markers$diffexpressed != "NO"] <- deg.markers$Gene[deg.markers$diffexpressed != "NO"]
+  ##save into table
+  write.table(deg.markers, file=here(paste0("../results/MGHSCLC002031036037/text/",Sys.Date(),"_volcano_",group,"_vs_triple_negative_fc_",fcthresh,"_p",pthresh,".txt")),quote=FALSE,col.names = NA,sep="\t")
+  write.xlsx(deg.markers,here(paste0("../results/MGHSCLC002031036037/text/",Sys.Date(),"_volcano_",group,"_vs_triple_negative_fc_",fcthresh,"_p",pthresh,".xlsx")))
+  # plot adding up all layers we have seen so far
+  try({
+    pdf(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_volcano_",group,"_vs_triple_negative_fc_",fcthresh,"_p",pthresh,".pdf")))
+    p <- ggplot(data=deg.markers, aes(x=avg_log2FC, y=-log10(p_val_adj), col=diffexpressed, label=delabel)) +
+      geom_point() +
+      theme_minimal() +
+      geom_text_repel(size=2,max.overlaps = 40) +
+      scale_color_manual(values=c("blue", "black", "red")) +
+      geom_vline(xintercept=c(-log2(fcthresh), log2(fcthresh)), col="red") +
+      geom_hline(yintercept=-log10(pthresh), col="red") +
+      ggtitle(paste0(group," vs triple neg: ")) + xlab("log2FoldChange")
+    print(p)
+    dev.off()})
+  ## enrichment
+  # only HALLMARK set
+  TERM2GENE <- msigdbr(species = "Homo sapiens", category = "H")%>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
+  # UP
+  try({
+    emsigdbup <- enricher(gene =  deg.markers$Gene[which(deg.markers$diffexpressed=="UP")], TERM2GENE = TERM2GENE)
+    pdf(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_dotplot_enrichment_",group,"_vs_triple_negative_UP_fc",fcthresh,"_p",pthresh,".pdf")))
+    p <- dotplot(emsigdbup, showCategory=25, font.size = 7, title=paste0("MSigDB (UP): ",group))+scale_y_discrete(labels=function(x) str_wrap(x, width=25))
+    print(p)
+    dev.off()})
+  ##DOWN
+  try({
+    emsigdbdn <- enricher(gene =  deg.markers$Gene[which(deg.markers$diffexpressed=="DOWN")], TERM2GENE = TERM2GENE)
+    pdf(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_dotplot_enrichment_",group,"__vs_triple_negative_DOWN_fc",fcthresh,"_p",pthresh,".pdf")))
+    p<- dotplot(emsigdbdn, showCategory=25, font.size = 7, title=paste0("MSigDB (DOWN): ",group))+scale_y_discrete(labels=function(x) str_wrap(x, width=25))
+    print(p)
+    dev.off()})
+}
+
+
+#4. What are the GSEA type patterns for EpCAM positive tumor cells or CTCs that don’t have neuroendocrine markers?
+
+epi_sub <- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/","scrna.obj.seurat.withanno.3sample.tumorOnly.rds"))
+
+data1 <- FetchData(epi_sub, vars = c("EPCAM","DLL3","SEZ6","CD276","ASCL1","POU2F3","YAP1","NEUROD1","CHGA", "NCAM1", "SYP","INSM1"))
+
+data2 <- ifelse(data1>0,1,0)
+
+epi_sub$epcam_gsea <- "otherTumorCell"
+
+epi_sub$epcam_gsea[which(rowSums(data2)==1 & data1$EPCAM>0)] <- "EPCAM+OnlyNoNE"
+
+saveRDS(epi_sub,paste0("../results/MGHSCLC002031036037/Rdata/","scrna.obj.seurat.withanno.3sample.tumorOnly.rds"))
+
+
+Idents(epi_sub) <- 'epcam_gsea'
+
+test.groups <- c("EPCAM+OnlyNoNE")
+ctrl <- "otherTumorCell"
+for(group in test.groups){
+  case <- group
+  deg.markers <- FindMarkers(epi_sub, ident.1 = case, ident.2 = ctrl)
+  deg.markers$Gene <- rownames(deg.markers)
+  # add a column of NAs
+  deg.markers$diffexpressed <- "NO"
+  fcthresh <- 2
+  pthresh <- 0.05
+  # if avg_log2FC > FCthreshold and p_val_adj < pthreshold, set as "UP"
+  deg.markers$diffexpressed[deg.markers$avg_log2FC > log2(fcthresh) & deg.markers$p_val_adj < pthresh] <- "UP"
+  # if avg_log2FC < -FCthreshold and p_val_adj < pthreshold, set as "DOWN"
+  deg.markers$diffexpressed[deg.markers$avg_log2FC < -log2(fcthresh) & deg.markers$p_val_adj < pthresh] <- "DOWN"
+  # Create a new column "delabel" to de, that will contain the name of genes differentially expressed (NA in case they are not)
+  deg.markers$delabel <- NA
+  deg.markers$delabel[deg.markers$diffexpressed != "NO"] <- deg.markers$Gene[deg.markers$diffexpressed != "NO"]
+  ##save into table
+  write.table(deg.markers, file=here(paste0("../results/MGHSCLC002031036037/text/",Sys.Date(),"_volcano_",group,"_vs_",ctrl,"_fc_",fcthresh,"_p",pthresh,".txt")),quote=FALSE,col.names = NA,sep="\t")
+  write.xlsx(deg.markers,here(paste0("../results/MGHSCLC002031036037/text/",Sys.Date(),"_volcano_",group,"_vs_",ctrl,"_fc_",fcthresh,"_p",pthresh,".xlsx")))
+  # plot adding up all layers we have seen so far
+  try({
+    pdf(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_volcano_",group,"_vs_",ctrl,"_fc_",fcthresh,"_p",pthresh,".pdf")))
+    p <- ggplot(data=deg.markers, aes(x=avg_log2FC, y=-log10(p_val_adj), col=diffexpressed, label=delabel)) +
+      geom_point() +
+      theme_minimal() +
+      geom_text_repel(size=2,max.overlaps = 40) +
+      scale_color_manual(values=c("blue", "black", "red")) +
+      geom_vline(xintercept=c(-log2(fcthresh), log2(fcthresh)), col="red") +
+      geom_hline(yintercept=-log10(pthresh), col="red") +
+      ggtitle(paste0(group," vs ", ctrl,": ")) + xlab("log2FoldChange")
+    print(p)
+    dev.off()})
+  ## enrichment
+  # only HALLMARK set
+  TERM2GENE <- msigdbr(species = "Homo sapiens", category = "H")%>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
+  # UP
+  try({
+    emsigdbup <- enricher(gene =  deg.markers$Gene[which(deg.markers$diffexpressed=="UP")], TERM2GENE = TERM2GENE)
+    pdf(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_dotplot_enrichment_",group,"_vs_",ctrl,"_UP_fc",fcthresh,"_p",pthresh,".pdf")))
+    p <- dotplot(emsigdbup, showCategory=25, font.size = 7, title=paste0("MSigDB (UP): ",group))+scale_y_discrete(labels=function(x) str_wrap(x, width=25))
+    print(p)
+    dev.off()})
+  ##DOWN
+  try({
+    emsigdbdn <- enricher(gene =  deg.markers$Gene[which(deg.markers$diffexpressed=="DOWN")], TERM2GENE = TERM2GENE)
+    pdf(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_dotplot_enrichment_",group,"__vs_",ctrl,"_DOWN_fc",fcthresh,"_p",pthresh,".pdf")))
+    p<- dotplot(emsigdbdn, showCategory=25, font.size = 7, title=paste0("MSigDB (DOWN): ",group))+scale_y_discrete(labels=function(x) str_wrap(x, width=25))
+    print(p)
+    dev.off()})
+}
+
+
+```
+
+Step 6.7: figure for manuscript
+
+```{r}
+# load object with individual level annotation
+
+epi_sub <- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/","scrna.obj.seurat.withanno.3sample.tumorOnly.rds"))
+
+### get 036 and 037
+
+epi_sub_base <- subset(epi_sub,subset=(sample %in% c("MGHSCLC036","MGHSCLC037")))
+
+epi_sub_base <- NormalizeData(epi_sub_base)
+epi_sub_base <- FindVariableFeatures(epi_sub_base)
+epi_sub_base <- ScaleData(epi_sub_base,vars.to.regress = c("percent.mito"))
+epi_sub_base <- RunPCA(epi_sub_base, npcs = 30, verbose = F)
+
+epi_sub_base <- RunUMAP(epi_sub_base, reduction = "pca",dims = 1:30, reduction.name = "umap")
+
+
+
+DimPlot(
+  epi_sub_base,
+  reduction = "umap",
+  group.by = "sample",
+  combine = FALSE, label.size = 6
+)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_sample_036037_maligOnly.pdf")))
+
+
+FeaturePlot(epi_sub_base,features="DLL3")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_DLL3_036037_maligOnly.pdf")))
+
+
+FeaturePlot(epi_sub_base,features="SEZ6") 
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_SEZ6_036037_maligOnly.pdf")))
+
+
+FeaturePlot(epi_sub_base,features="CD276")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_CD276_036037_maligOnly.pdf")))
+
+
+FeaturePlot3(epi_sub_base, feature.1 = "DLL3", feature.2 = "SEZ6", feature.3 = "CD276", pt.size = 1)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_3targets_036037_maligOnly.pdf")))
+
+
+## merge together
+
+p1 <- FeaturePlot(epi_sub_base,features="DLL3")
+p2 <- FeaturePlot(epi_sub_base,features="SEZ6")
+p3 <- FeaturePlot(epi_sub_base,features="CD276")
+p4 <- FeaturePlot3(epi_sub_base, feature.1 = "DLL3", feature.2 = "SEZ6", feature.3 = "CD276", pt.size = 1) + theme(legend.text=element_text(size=2),
+        legend.title=element_text(size=3))
+
+ggarrange(p1,p2,p3,p4, ncol = 2, nrow = 2)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_4in1_036037_maligOnly.pdf")))
+
+## could not change the three-in-1 figure legend size
+
+## venn diagram
+
+SEZ6_pos <- WhichCells(epi_sub_base, expression=SEZ6 > 0)
+B7H3_pos <- WhichCells(epi_sub_base, expression=CD276 >0)
+DLL3_pos <- WhichCells(epi_sub_base, expression=DLL3 >0) 
+
+a <- list(`DLL3+`=DLL3_pos,`SEZ6+`=SEZ6_pos,`B7H3+`=B7H3_pos)
+  
+p <- plot(euler(a, shape = "ellipse",main=st), quantities = TRUE)
+g <- grid.arrange(grobs=list(p),top="MGHSCLC036&037")
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_SEZ6_DLL3_B7H3_euler_036037.pdf")),g)
+
+
+
+##### recurrent 002
+
+epi_sub_base <- subset(epi_sub,subset=(sample=="MGHSCLC002"))
+
+epi_sub_base <- NormalizeData(epi_sub_base)
+epi_sub_base <- FindVariableFeatures(epi_sub_base)
+epi_sub_base <- ScaleData(epi_sub_base,vars.to.regress = c("percent.mito"))
+epi_sub_base <- RunPCA(epi_sub_base, npcs = 10, verbose = F)
+
+epi_sub_base <- RunUMAP(epi_sub_base, reduction = "pca",dims = 1:10, n.neighbors=5,reduction.name = "umap")
+
+
+
+FeaturePlot(epi_sub_base,features="DLL3")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_DLL3_002_maligOnly.pdf")))
+
+
+FeaturePlot(epi_sub_base,features="SEZ6") 
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_SEZ6_002_maligOnly.pdf")))
+
+
+FeaturePlot(epi_sub_base,features="CD276")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_CD276_002_maligOnly.pdf")))
+
+
+FeaturePlot3(epi_sub_base, feature.1 = "DLL3", feature.2 = "SEZ6", feature.3 = "CD276", pt.size = 1)
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_by_3targets_002_maligOnly.pdf")))
+
+### soem additional questions
+
+epi_sub <- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/","scrna.obj.seurat.withanno.3sample.tumorOnly.rds"))
+
+genes_to_plot <- c("DLL3","SEZ6","CD276","sample")
+
+## normalized data
+
+# 1. Fetch data
+data_to_plot <- FetchData(epi_sub, vars = c(genes_to_plot))
+
+# 2. Prepare data for ggplot2
+data_long <- pivot_longer(data_to_plot, cols = all_of(genes_to_plot[1:3]), names_to = "gene", values_to = "expression")
+
+# 3. Create ggplot2 density plot
+ggplot(data_long, aes(x = expression, color = gene, fill = gene)) +
+  geom_density(alpha = 0.3) +
+  theme_bw() +
+  facet_wrap(~ sample) +
+  labs(title = "Gene Expression Density", x = "Expression (log-normalized)", y = "Density") +
+  scale_fill_brewer(palette = "Set2") +
+  scale_color_brewer(palette = "Set2")
+
+#ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_densityPlot_by_3targets_maligOnly.pdf")))
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_densityPlot_by_3targets_maligOnly_splitBy_Sample.pdf")))
+
+## raw UMI
+
+# 1. Fetch data
+data_to_plot <- FetchData(epi_sub, vars = c(genes_to_plot), layer="count")
+
+# 2. Prepare data for ggplot2
+data_long <- pivot_longer(data_to_plot, cols = all_of(genes_to_plot[1:3]), names_to = "gene", values_to = "expression")
+
+# 3. Create ggplot2 density plot
+ggplot(data_long, aes(x = expression, color = gene, fill = gene)) +
+  geom_density(alpha = 0.3) +
+  theme_bw() +
+  facet_wrap(~ sample) +
+  labs(title = "Gene Expression Density", x = "Expression (raw #UMI)", y = "Density") +
+  scale_fill_brewer(palette = "Set2") +
+  scale_color_brewer(palette = "Set2")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_densityPlot_by_3targets_maligOnly_splitBy_Sample_raw_UMI.pdf")))
+
+
+
+```
+
+## Step 6.8: redefine positive cells with raw UMI cutoffs
+
+```{r}
+## final epi_sub
+epi_sub <- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/","scrna.obj.seurat.withanno.3sample.tumorOnly.rds"))
+
+ucuts <- c(1,2,3,5)
+samples <- unique(epi_sub$sample)
+for (samp in samples){
+  for (cut in ucuts){
+    epi_tmp <- subset(epi_sub,subset=sample==samp)
+    SEZ6_pos <- WhichCells(epi_tmp, expression=SEZ6 >=cut,slot="count")
+    B7H3_pos <- WhichCells(epi_tmp, expression=CD276 >=cut,slot="count")
+    DLL3_pos <- WhichCells(epi_tmp, expression=DLL3 >=cut,slot="count") 
+    
+    a <- list(`DLL3+`=DLL3_pos,`SEZ6+`=SEZ6_pos,`B7H3+`=B7H3_pos)
+      
+    p <- plot(euler(a, shape = "ellipse"), quantities = TRUE)
+    g <- grid.arrange(grobs=list(p),top=paste0(samp,"(>=",cut,"UMI)"))
+    ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_SEZ6_DLL3_B7H3_euler_",samp,"_",cut,"UMI.pdf")),g)
+      
+  }
+}
+
+
+```
+
+## Step 6.9: prepare figures on 2025-06-30
+
+```{r}
+
+#### plot UMAP for 036 and 037 highlight tumor cells
+
+### load 036
+
+scrna.036<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC036.scrna.seurat.final.rds"))
+
+DimPlot(scrna.036, label=T,cells.highlight = WhichCells(scrna.036,expression = final_anno=="epithelial")) + NoLegend()
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_MGHSCLC036_tumor_highlighted.pdf")))
+
+## plot tumor only with three targets
+
+scrna.036_sub <- subset(scrna.036,subset=final_anno=="epithelial")
+
+## DLL3
+## DLL3 pos vs neg
+scrna.036_sub$DLL3_group <- "neg"
+ 
+scrna.036_sub$DLL3_group[which(scrna.036_sub[['RNA']]$data["DLL3",] > 0)] <- "pos" 
+scrna.036_sub$DLL3_group <- factor(scrna.036_sub$DLL3_group)
+
+scrna.036_sub$SEZ6_group <- "neg"
+ 
+scrna.036_sub$SEZ6_group[which(scrna.036_sub[['RNA']]$data["SEZ6",] > 0)] <- "pos" 
+scrna.036_sub$SEZ6_group <- factor(scrna.036_sub$SEZ6_group)
+
+scrna.036_sub$CD276_group <- "neg"
+ 
+scrna.036_sub$CD276_group[which(scrna.036_sub[['RNA']]$data["CD276",] > 0)] <- "pos" 
+scrna.036_sub$CD276_group <- factor(scrna.036_sub$CD276_group)
+
+
+##showing tumor cells with binary expression
+
+scrna.036_sub$DLL3_ <- ifelse(scrna.036_sub$DLL3_group=="neg",0,1)
+scrna.036_sub$SEZ6_ <- ifelse(scrna.036_sub$SEZ6_group=="neg",0,1)
+scrna.036_sub$B7H3_ <- ifelse(scrna.036_sub$CD276_group=="neg",0,1)
+
+FeaturePlot3(scrna.036_sub, feature.1 = "DLL3_", feature.2 = "SEZ6_", feature.3 = "B7H3_", pt.size = 1, color.range=c(0,1))
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_SEZ6_DLL3_B7H3_binary_tumorOnly_036.pdf")))
+
+
+## venn diagram include all cells
+
+DLL3_pos <- WhichCells(scrna.036_sub, expression=DLL3_group=="pos")
+SEZ6_pos <- WhichCells(scrna.036_sub, expression=SEZ6_group=="pos")
+B7H3_pos <- WhichCells(scrna.036_sub, expression=CD276_group=="pos")
+total <- colnames(scrna.036_sub)
+
+a <- list(`negative`=total,`DLL3+`=DLL3_pos,`SEZ6+`=SEZ6_pos,`B7H3+`=B7H3_pos)
+
+p <- plot(euler(a, shape = "circle"), fills = list(fill = c("gray","red","orange", "steelblue4")),quantities = TRUE)
+g <- grid.arrange(grobs=list(p))
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_SEZ6_DLL3_B7H3_circleDifferentSize_allIn_036.pdf")),g)
+
+### missing 1B7H3+ cell
+
+## tried three sets with euler using circles (still missing that cell) and ggvenn(cannot scale for three sets)
+## only ellipse works
+
+a <- list(`negative`=total,`DLL3+`=DLL3_pos,`SEZ6+`=SEZ6_pos,`B7H3+`=B7H3_pos)
+
+p <- plot(euler(a, shape = "ellipse"), fills = list(fill = c("gray","red","orange", "steelblue4")),quantities = TRUE)
+g <- grid.arrange(grobs=list(p))
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_SEZ6_DLL3_B7H3_ellipseDifferentSize_allIn_036.pdf")),g)
+
+
+### load 037
+
+scrna.037<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC037.scrna.seurat.with.anno.rds"))
+
+DimPlot(scrna.037, label=T,cells.highlight = WhichCells(scrna.037,expression = final_anno=="epithelial")) + NoLegend()
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_MGHSCLC037_tumor_highlighted.pdf")))
+
+## plot tumor only with three targets
+
+scrna.037_sub <- subset(scrna.037,subset=final_anno=="epithelial")
+
+## DLL3
+## DLL3 pos vs neg
+scrna.037_sub$DLL3_group <- "neg"
+ 
+scrna.037_sub$DLL3_group[which(scrna.037_sub[['RNA']]$data["DLL3",] > 0)] <- "pos" 
+scrna.037_sub$DLL3_group <- factor(scrna.037_sub$DLL3_group)
+
+scrna.037_sub$SEZ6_group <- "neg"
+ 
+scrna.037_sub$SEZ6_group[which(scrna.037_sub[['RNA']]$data["SEZ6",] > 0)] <- "pos" 
+scrna.037_sub$SEZ6_group <- factor(scrna.037_sub$SEZ6_group)
+
+scrna.037_sub$CD276_group <- "neg"
+ 
+scrna.037_sub$CD276_group[which(scrna.037_sub[['RNA']]$data["CD276",] > 0)] <- "pos" 
+scrna.037_sub$CD276_group <- factor(scrna.037_sub$CD276_group)
+
+
+##showing tumor cells with binary expression
+
+scrna.037_sub$DLL3_ <- ifelse(scrna.037_sub$DLL3_group=="neg",0,1)
+scrna.037_sub$SEZ6_ <- ifelse(scrna.037_sub$SEZ6_group=="neg",0,1)
+scrna.037_sub$B7H3_ <- ifelse(scrna.037_sub$CD276_group=="neg",0,1)
+
+FeaturePlot3(scrna.037_sub, feature.1 = "DLL3_", feature.2 = "SEZ6_", feature.3 = "B7H3_", pt.size = 1, color.range=c(0,1))
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_SEZ6_DLL3_B7H3_binary_tumorOnly_037.pdf")))
+
+FeaturePlot(scrna.037_sub,feature=c("DLL3","SEZ6","CD276"))
+
+## venn diagram include all cells
+
+DLL3_pos <- WhichCells(scrna.037_sub, expression=DLL3_group=="pos")
+SEZ6_pos <- WhichCells(scrna.037_sub, expression=SEZ6_group=="pos")
+B7H3_pos <- WhichCells(scrna.037_sub, expression=CD276_group=="pos")
+total <- colnames(scrna.037_sub)
+
+a <- list(`negative`=total,`DLL3+`=DLL3_pos,`SEZ6+`=SEZ6_pos,`B7H3+`=B7H3_pos)
+
+p <- plot(euler(a, shape = "circle"), fills = list(fill = c("gray","red","orange", "steelblue4")),quantities = TRUE)
+g <- grid.arrange(grobs=list(p))
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_SEZ6_DLL3_B7H3_circleDifferentSize_allIn_037.pdf")),g)
+
+
+```
+
+## Step 6.10: edit figure on 2025-07-09
+```{r}
+
+scrna.037<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC037.scrna.seurat.with.anno.rds"))
+
+## remove platelets
+#FeaturePlot(scrna.037,features=c("CD62P","PF4","CD41"))
+scrna.037.sub <- subset(scrna.037,subset=final_anno=="platelet",invert=TRUE)
+
+#DimPlot(scrna.037.sub,group.by = "final_anno")
+
+DimPlot(
+  scrna.037.sub,
+  reduction = "umap",
+  group.by = "final_anno",
+  label.size = 4,
+  label=TRUE,
+  cols=c("neutrophil"="#7CAE00","mast"="#C77CFF","monocyte"="#008FC4","B"="#9999CC","pDC"="#8494FF","T"="#00C19A","plasma"="#E68613","epithelial"="#FF3300","endothelial"="#99CCCC","NK"="#ABA300","RBC"="#00FF00")) + theme(legend.position = "none")+ labs(title="Patient B")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_allCell_037_noPlatelet.pdf")))
+
+## CTC only with three labeled
+## assign three groups
+
+scrna.037.sub <- subset(scrna.037.sub,subset=final_anno=="epithelial")
+
+scrna.037.sub$DLL3_group <- "neg"
+ 
+scrna.037.sub$DLL3_group[which(scrna.037.sub[['RNA']]$data["DLL3",] > 0)] <- "pos" 
+
+
+scrna.037.sub$SEZ6_group <- "neg"
+ 
+scrna.037.sub$SEZ6_group[which(scrna.037.sub[['RNA']]$data["SEZ6",] > 0)] <- "pos" 
+
+
+scrna.037.sub$CD276_group <- "neg"
+scrna.037.sub$CD276_group[which(scrna.037.sub[['RNA']]$data["CD276",] > 0)] <- "pos" 
+ 
+
+scrna.037.sub$DLL3_ <- ifelse(scrna.037.sub$DLL3_group=="neg",0,1)
+scrna.037.sub$SEZ6_ <- ifelse(scrna.037.sub$SEZ6_group=="neg",0,1)
+scrna.037.sub$B7H3_ <- ifelse(scrna.037.sub$CD276_group=="neg",0,1)
+
+#FeaturePlot3(scrna.037.sub, feature.1 = "DLL3_", feature.2 = "SEZ6_", feature.3 = "B7H3_", pt.size = 0.1, color.range=c(0,1))
+## 2025-07-16 switch color and make it orange for DLL3
+FeaturePlot3(scrna.037.sub, feature.2 = "DLL3_", feature.1 = "SEZ6_", feature.3 = "B7H3_", pt.size = 0.1, color.range=c(0,1))
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_SEZ6_DLL3_B7H3_binary_smallDot.tumorOnly_037.pdf")))
+
+
+### Figure 7D: 2025-07-17 change DLL3 to orange, B7H3 to yellow for CTCs
+
+scrna.037<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC037.scrna.seurat.with.anno.rds"))
+
+scrna.037.sub <- subset(scrna.037,subset=final_anno=="epithelial")
+
+scrna.037.sub$DLL3_group <- "neg"
+ 
+scrna.037.sub$DLL3_group[which(scrna.037.sub[['RNA']]$data["DLL3",] > 0)] <- "pos" 
+
+
+scrna.037.sub$SEZ6_group <- "neg"
+ 
+scrna.037.sub$SEZ6_group[which(scrna.037.sub[['RNA']]$data["SEZ6",] > 0)] <- "pos" 
+
+
+scrna.037.sub$CD276_group <- "neg"
+scrna.037.sub$CD276_group[which(scrna.037.sub[['RNA']]$data["CD276",] > 0)] <- "pos" 
+ 
+
+scrna.037.sub$DLL3_ <- ifelse(scrna.037.sub$DLL3_group=="neg",0,1)
+scrna.037.sub$SEZ6_ <- ifelse(scrna.037.sub$SEZ6_group=="neg",0,1)
+scrna.037.sub$B7H3_ <- ifelse(scrna.037.sub$CD276_group=="neg",0,1)
+
+df <- as.data.frame(FetchData(scrna.037.sub,c("umap_1","umap_2","DLL3_","SEZ6_","B7H3_","sample")))
+
+df_grouped <- df %>%
+  group_by(DLL3_, SEZ6_, B7H3_) %>%
+  mutate(group = cur_group_id()) %>%
+  ungroup() %>% as.data.frame()
+
+# unique(df_grouped[,c(3,4,5,7)])
+#     DLL3_ SEZ6_ B7H3_ group
+# 1       0     0     0     1
+# 3       1     0     1     6
+# 7       1     1     1     8
+# 15      1     0     0     5
+# 18      1     1     0     7
+# 19      0     1     1     4
+# 28      0     0     1     2
+# 103     0     1     0     3
+
+## colors
+
+
+rgb(1,0.647,0) "#FFA500"  ## DLL3
+rgb(1,1,0)  "#FFFF00" ## B7H3
+rgb(0.39,0.72,1) "#63B8FF" ## SEZ6
+rgb(1,1,1) "#FFFFFF"
+rgb(0,0,0) "#000000"
+rgb(0.5,0.5,0.5) "#808080"
+
+#rgb(0.73,0.2,0.33) "#BA3354"
+rgb(0.54,0.067,0.16) "#8A1129"
+
+ref_col <- data.frame(group=1:8,col_val=c(rgb(1,1,1), # group 1
+                                         rgb(1,1,0), # 2
+                                         rgb(0.39,0.72,1), # 3
+                                         rgb(0.695, 0.860, 0.500), #4: colMeans(rbind(r_s,r_b))
+                                         rgb(1,0.647,0), # 5
+                                         rgb(1,0.8235,0), #6
+                                         rgb(0.6950, 0.6835, 0.5), #7
+                                         rgb(0.7966667, 0.7890000, 0.3333333) #8
+                                         ))
+
+
+df_col <- merge(df_grouped,ref_col)
+
+data_col <- c("1"="#FFFFFF","2"="#FFFF00","3"="#63B8FF","4"="#B1DB80","5"="#FFA500", "6"="#FFD200","7"="#B1AE80","8"= "#CBC955")
+
+
+## custom legend with three genes
+
+legend_df <- data.frame(
+  x = 11,
+  y = c(10, 9,8),
+  label = c('DLL3', 'SEZ6', 'B7H3'),
+  color=c("#FFA500", "#63B8FF","#FFFF00") # The desired colors for the legend
+)
+
+p <- ggplot(df_col,aes(x=umap_1,y=umap_2)) + geom_point(aes(color=factor(group)),size=1,stroke=0.1) + 
+  scale_colour_manual(values=data_col,guide="none") + theme_minimal() +
+  theme(panel.border = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(color = "black"))  
+
+ 
+p+
+  geom_point(data = legend_df,
+             aes(x = x, y = y, color = label ),
+             size = 4) +
+  geom_text(data = legend_df,
+            aes(x = x + 0.3, y = y, label = label),
+            hjust = 0,size=4) +# get all elements but need to change the color for new legend at this layer
+  scale_color_manual(name="",values = c(data_col,setNames(legend_df$color, legend_df$label)) ,guide="none")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_SEZ6_DLL3_B7H3_binary_tumorOnly_037_newColor.pdf")))
+
+
+## try different color I: "#8A1129" ##for B7H3
+
+# unique(df_grouped[,c(3,4,5,7)])
+#     DLL3_ SEZ6_ B7H3_ group
+# 1       0     0     0     1
+# 3       1     0     1     6
+# 7       1     1     1     8
+# 15      1     0     0     5
+# 18      1     1     0     7
+# 19      0     1     1     4
+# 28      0     0     1     2
+# 103     0     1     0     3
+
+## colors
+
+
+rgb(1,0.647,0) "#FFA500"  ## DLL3
+#rgb(1,1,0)  "#FFFF00" ## B7H3
+rgb(0.39,0.72,1) "#63B8FF" ## SEZ6
+rgb(1,1,1) "#FFFFFF"
+rgb(0,0,0) "#000000"
+rgb(0.5,0.5,0.5) "#808080"
+
+#rgb(0.73,0.2,0.33) "#BA3354"
+rgb(0.54,0.067,0.16) "#8A1129" ##for B7H3
+
+r_s <- c(0.39,0.72,1)
+r_b <- c(0.54,0.067,0.16)
+r_d <- c(1,0.647,0)
+
+ref_col <- data.frame(group=1:8,col_val=c(rgb(1,1,1), # group 1
+                                         rgb(0.54,0.067,0.16), # 2
+                                         rgb(0.39,0.72,1), # 3
+                                         rgb(0.465, 0.3935, 0.58), #4: colMeans(rbind(r_s,r_b))
+                                         rgb(1,0.647,0), # 5
+                                         rgb(0.77,0.357,0.08), #6
+                                         rgb(0.6950, 0.6835, 0.5), #7
+                                         rgb(0.6433333, 0.4780000, 0.3866667) #8
+                                         ))
+
+df_col <- merge(df_grouped,ref_col)
+
+data_col <- c("1"="#FFFFFF","2"="#8A1129","3"="#63B8FF","4"="#776494","5"="#FFA500", "6"="#C45B14","7"="#B1AE80","8"= "#A47A63")
+
+legend_df <- data.frame(
+  x = 11,
+  y = c(10, 9,8),
+  label = c('DLL3', 'SEZ6', 'B7H3'),
+  color=c("#FFA500", "#63B8FF","#8A1129") # The desired colors for the legend
+)
+
+
+
+p <- ggplot(df_col,aes(x=umap_1,y=umap_2)) + geom_point(aes(color=factor(group)),size=1,stroke=0.1) + 
+  scale_colour_manual(values=data_col,guide="none") + theme_minimal() +
+  theme(panel.border = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(color = "black"))  
+
+ 
+p+
+  geom_point(data = legend_df,
+             aes(x = x, y = y, color = label ),
+             size = 4) +
+  geom_text(data = legend_df,
+            aes(x = x + 0.3, y = y, label = label),
+            hjust = 0,size=4) +# get all elements but need to change the color for new legend at this layer
+  scale_color_manual(name="",values = c(data_col,setNames(legend_df$color, legend_df$label)) ,guide="none")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_SEZ6_DLL3_B7H3_binary_tumorOnly_037_newColor_1.pdf")))
+
+
+### try different color II: "#00C299" for B7H3
+
+# unique(df_grouped[,c(3,4,5,7)])
+#     DLL3_ SEZ6_ B7H3_ group
+# 1       0     0     0     1
+# 3       1     0     1     6
+# 7       1     1     1     8
+# 15      1     0     0     5
+# 18      1     1     0     7
+# 19      0     1     1     4
+# 28      0     0     1     2
+# 103     0     1     0     3
+
+## colors
+
+
+rgb(1,0.647,0) "#FFA500"  ## DLL3
+#rgb(1,1,0)  "#FFFF00" ## B7H3
+rgb(0.39,0.72,1) "#63B8FF" ## SEZ6
+rgb(1,1,1) "#FFFFFF"
+rgb(0,0,0) "#000000"
+rgb(0.5,0.5,0.5) "#808080"
+
+#rgb(0.73,0.2,0.33) "#BA3354"
+#rgb(0.54,0.067,0.16) "#8A1129" ##for B7H3
+rgb(0,0.76,0.6)   "#00C299" # for B7H3
+
+r_s <- c(0.39,0.72,1)
+r_b <- c(0,0.76,0.6)
+r_d <- c(1,0.647,0)
+
+ref_col <- data.frame(group=1:8,col_val=c(rgb(1,1,1), # group 1
+                                         rgb(0,0.76,0.6), # 2
+                                         rgb(0.39,0.72,1), # 3
+                                         rgb(0.195, 0.74, 0.8), #4: colMeans(rbind(r_s,r_b))
+                                         rgb(1,0.647,0), # 5
+                                         rgb(0.5,0.7035,0.3), #6
+                                         rgb(0.6950, 0.6835, 0.5), #7
+                                         rgb(0.4633, 0.709, 0.533) #8
+                                         ))
+
+df_col <- merge(df_grouped,ref_col)
+
+data_col <- c("1"="#FFFFFF","2"="#00C299","3"="#63B8FF","4"="#32BDCC","5"="#FFA500", "6"="#80B34D","7"="#B1AE80","8"= "#76B588")
+
+
+legend_df <- data.frame(
+  x = 11,
+  y = c(10, 9,8),
+  label = c('DLL3', 'SEZ6', 'B7H3'),
+  color=c("#FFA500", "#63B8FF","#00C299") # The desired colors for the legend
+)
+
+
+
+p <- ggplot(df_col,aes(x=umap_1,y=umap_2)) + geom_point(aes(color=factor(group)),size=1,stroke=0.1) + 
+  scale_colour_manual(values=data_col,guide="none") + theme_minimal() +
+  theme(panel.border = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(color = "black"))  
+
+ 
+p+
+  geom_point(data = legend_df,
+             aes(x = x, y = y, color = label ),
+             size = 4) +
+  geom_text(data = legend_df,
+            aes(x = x + 0.3, y = y, label = label),
+            hjust = 0,size=4) +# get all elements but need to change the color for new legend at this layer
+  scale_color_manual(name="",values = c(data_col,setNames(legend_df$color, legend_df$label)) ,guide="none")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_SEZ6_DLL3_B7H3_binary_tumorOnly_037_newColor_2.pdf")))
+
+
+## try color III: "#F2C7FF" for B7H3
+
+# unique(df_grouped[,c(3,4,5,7)])
+#     DLL3_ SEZ6_ B7H3_ group
+# 1       0     0     0     1
+# 3       1     0     1     6
+# 7       1     1     1     8
+# 15      1     0     0     5
+# 18      1     1     0     7
+# 19      0     1     1     4
+# 28      0     0     1     2
+# 103     0     1     0     3
+
+## colors
+
+
+rgb(1,0.647,0) "#FFA500"  ## DLL3
+#rgb(1,1,0)  "#FFFF00" ## B7H3
+rgb(0.39,0.72,1) "#63B8FF" ## SEZ6
+rgb(1,1,1) "#FFFFFF"
+rgb(0,0,0) "#000000"
+rgb(0.5,0.5,0.5) "#808080"
+
+#rgb(0.73,0.2,0.33) "#BA3354"
+#rgb(0.54,0.067,0.16) "#8A1129" ##for B7H3
+#rgb(0,0.76,0.6)   "#00C299" # for B7H3
+rgb(0.95,0.78,1) "#F2C7FF" # for B7H3
+
+r_s <- c(0.39,0.72,1)
+r_b <- c(0.95,0.78,1)
+r_d <- c(1,0.647,0)
+
+ref_col <- data.frame(group=1:8,col_val=c(rgb(1,1,1), # group 1
+                                         rgb(0.95,0.78,1), # 2
+                                         rgb(0.39,0.72,1), # 3
+                                         rgb(0.67, 0.75, 1), #4: colMeans(rbind(r_s,r_b))
+                                         rgb(1,0.647,0), # 5
+                                         rgb(0.975,0.7135,0.5), #6
+                                         rgb(0.6950, 0.6835, 0.5), #7
+                                         rgb(0.78, 0.7157, 0.667) #8
+                                         ))
+
+df_col <- merge(df_grouped,ref_col)
+
+data_col <- c("1"="#FFFFFF","2"="#F2C7FF","3"="#63B8FF","4"="#ABBFFF","5"="#FFA500", "6"="#F9B680","7"="#B1AE80","8"= "#C7B7AA")
+
+
+legend_df <- data.frame(
+  x = 11,
+  y = c(10, 9,8),
+  label = c('DLL3', 'SEZ6', 'B7H3'),
+  color=c("#FFA500", "#63B8FF","#F2C7FF") # The desired colors for the legend
+)
+
+
+
+p <- ggplot(df_col,aes(x=umap_1,y=umap_2)) + geom_point(aes(color=factor(group)),size=1,stroke=0.1) + 
+  scale_colour_manual(values=data_col,guide="none") + theme_minimal() +
+  theme(panel.border = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(color = "black"))  
+
+ 
+p+
+  geom_point(data = legend_df,
+             aes(x = x, y = y, color = label ),
+             size = 4) +
+  geom_text(data = legend_df,
+            aes(x = x + 0.3, y = y, label = label),
+            hjust = 0,size=4) +# get all elements but need to change the color for new legend at this layer
+  scale_color_manual(name="",values = c(data_col,setNames(legend_df$color, legend_df$label)) ,guide="none")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_SEZ6_DLL3_B7H3_binary_tumorOnly_037_newColor_3.pdf")))
+
+### try different color IV: "#BA3455" for B7H3
+
+
+# unique(df_grouped[,c(3,4,5,7)])
+#     DLL3_ SEZ6_ B7H3_ group
+# 1       0     0     0     1
+# 3       1     0     1     6
+# 7       1     1     1     8
+# 15      1     0     0     5
+# 18      1     1     0     7
+# 19      0     1     1     4
+# 28      0     0     1     2
+# 103     0     1     0     3
+
+## colors
+
+#rgb(0.73,0.2,0.33) "#BA3354"
+#rgb(0.54,0.067,0.16) "#8A1129" ##for B7H3
+#rgb(0,0.76,0.6)   "#00C299" # for B7H3
+#rgb(0.95,0.78,1) "#F2C7FF" # for B7H3
+rgb(0.73,0.204,0.333) "#BA3455" #for B7H3
+
+
+r_s <- c(0.39,0.72,1)
+r_b <- c(0.73,0.204,0.333)
+r_d <- c(1,0.647,0)
+
+ref_col <- data.frame(group=1:8,col_val=c(rgb(1,1,1), # group 1
+                                         rgb(0.73,0.204,0.333), # 2
+                                         rgb(0.39,0.72,1), # 3
+                                         rgb(0.56, 0.462, 0.6665), #4: colMeans(rbind(r_s,r_b))
+                                         rgb(1,0.647,0), # 5
+                                         rgb(0.865, 0.4255, 0.1665), #6
+                                         rgb(0.6950, 0.6835, 0.5), #7
+                                         rgb(0.7067, 0.52367, 0.4443) #8
+                                         ))
+
+df_col <- merge(df_grouped,ref_col)
+
+data_col <- c("1"="#FFFFFF","2"="#BA3455","3"="#63B8FF","4"="#8F76AA","5"="#FFA500", "6"="#DD6D2A","7"="#B1AE80","8"= "#B48671")
+
+
+legend_df <- data.frame(
+  x = 11,
+  y = c(10, 9,8),
+  label = c('DLL3', 'SEZ6', 'B7H3'),
+  color=c("#FFA500", "#63B8FF","#BA3455") # The desired colors for the legend
+)
+
+
+
+p <- ggplot(df_col,aes(x=umap_1,y=umap_2)) + geom_point(aes(color=factor(group)),size=1,stroke=0.1) + 
+  scale_colour_manual(values=data_col,guide="none") + theme_minimal() +
+  theme(panel.border = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(color = "black"))  
+
+ 
+p+
+  geom_point(data = legend_df,
+             aes(x = x, y = y, color = label ),
+             size = 4) +
+  geom_text(data = legend_df,
+            aes(x = x + 0.3, y = y, label = label),
+            hjust = 0,size=4) +# get all elements but need to change the color for new legend at this layer
+  scale_color_manual(name="",values = c(data_col,setNames(legend_df$color, legend_df$label)) ,guide="none")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_SEZ6_DLL3_B7H3_binary_tumorOnly_037_newColor_4.pdf")))
+
+## try different color V: "#9E59AD" for B7H3
+
+# unique(df_grouped[,c(3,4,5,7)])
+#     DLL3_ SEZ6_ B7H3_ group
+# 1       0     0     0     1
+# 3       1     0     1     6
+# 7       1     1     1     8
+# 15      1     0     0     5
+# 18      1     1     0     7
+# 19      0     1     1     4
+# 28      0     0     1     2
+# 103     0     1     0     3
+
+## colors
+
+#rgb(0.73,0.2,0.33) "#BA3354"
+#rgb(0.54,0.067,0.16) "#8A1129" ##for B7H3
+#rgb(0,0.76,0.6)   "#00C299" # for B7H3
+#rgb(0.95,0.78,1) "#F2C7FF" # for B7H3
+#rgb(0.73,0.204,0.333) "#BA3455" #for B7H3
+rgb(0.62,0.35,0.68) "#9E59AD" #for B7H3
+
+r_s <- c(0.39,0.72,1)
+r_b <- c(0.62,0.35,0.68)
+r_d <- c(1,0.647,0)
+
+ref_col <- data.frame(group=1:8,col_val=c(rgb(1,1,1), # group 1
+                                         rgb(0.62,0.35,0.68), # 2
+                                         rgb(0.39,0.72,1), # 3
+                                         rgb(0.505, 0.535, 0.84), #4: colMeans(rbind(r_s,r_b))
+                                         rgb(1,0.647,0), # 5
+                                         rgb(0.81, 0.4985, 0.34), #6
+                                         rgb(0.6950, 0.6835, 0.5), #7
+                                         rgb(0.67, 0.57, 0.56) #8
+                                         ))
+
+df_col <- merge(df_grouped,ref_col)
+
+data_col <- c("1"="#FFFFFF","2"="#9E59AD","3"="#63B8FF","4"="#8188D6","5"="#FFA500", "6"="#CF7F57","7"="#B1AE80","8"= "#AB918F")
+
+
+
+legend_df <- data.frame(
+  x = 11,
+  y = c(10, 9,8),
+  label = c('DLL3', 'SEZ6', 'B7H3'),
+  color=c("#FFA500", "#63B8FF","#9E59AD") # The desired colors for the legend
+)
+
+
+
+p <- ggplot(df_col,aes(x=umap_1,y=umap_2)) + geom_point(aes(color=factor(group)),size=1,stroke=0.1) + 
+  scale_colour_manual(values=data_col,guide="none") + theme_minimal() +
+  theme(panel.border = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(color = "black"))  
+
+ 
+p+
+  geom_point(data = legend_df,
+             aes(x = x, y = y, color = label ),
+             size = 4) +
+  geom_text(data = legend_df,
+            aes(x = x + 0.3, y = y, label = label),
+            hjust = 0,size=4) +# get all elements but need to change the color for new legend at this layer
+  scale_color_manual(name="",values = c(data_col,setNames(legend_df$color, legend_df$label)) ,guide="none")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_SEZ6_DLL3_B7H3_binary_tumorOnly_037_newColor_5.pdf")))
+
+
+
+
+## 7E:
+# single cell expression Of DLL3, SEZ6, B7H3 in CTCs from pt 37
+
+DLL3_pos <- WhichCells(scrna.037.sub, expression=DLL3_group=="pos")
+SEZ6_pos <- WhichCells(scrna.037.sub, expression=SEZ6_group=="pos")
+B7H3_pos <- WhichCells(scrna.037.sub, expression=CD276_group=="pos")
+
+a <- list(`DLL3+`=DLL3_pos,`SEZ6+`=SEZ6_pos,`B7H3+`=B7H3_pos)
+
+## use euler 
+#p <- plot(euler(a, shape = "circle"), quantities = list(type = c("counts", "percent"),round=2, cex=0.8),fill = list(fill = c("orangered", "gold","royalblue")))
+#plot(euler(a, shape = "circle"), quantities = list(type = c("counts", "percent"),round=4),fill = list(fill = c("orangered", "gold","royalblue")))
+## try complete wa
+fit <- euler(a)
+counts <- fit$original.values
+total <- sum(counts)
+
+# Compute percent
+percents <- round(counts / total * 100, 1)
+
+# Format labels: "Count (xx.xx%)"
+labels <- paste0(counts, " (", sprintf("%.1f", percents), "%)")
+
+# Set custom labels using region names
+names(labels) <- names(counts)
+
+# Plot with custom labels
+p <- plot(fit,
+     quantities = list(labels = labels),
+     fills = list(fill = c("orangered", "gold","royalblue")),
+     labels = list(font = 2))
+
+
+g <- grid.arrange(grobs=list(p))
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_SEZ6_DLL3_B7H3_euler_bothCP_differentSize_037_tumorOnly.pdf")),g)
+
+### not sure why adding the round parameter to the simple code did not work
+
+## 7F: 
+# single cell expression Of EpCAM vs “any of DLL3, SEZ6, B7H3” Out of denominator of CNV+ cells  in CTCs from pt 37
+
+EPCAM_pos <- WhichCells(scrna.037.sub, expression=EPCAM > 0)
+Any1_pos <- WhichCells(scrna.037.sub, expression=CD276_group=="pos" | DLL3_group=="pos" | SEZ6_group=="pos")
+all <- colnames(scrna.037.sub)
+
+a <- list(`negative`=all,`EpCAM+`=EPCAM_pos,`DLL3/SEZ6/B7H3+`=Any1_pos)
+
+p <- plot(euler(a, shape = "circle"), quantities = list(type = c("counts", "percent")),fill = list(fill = c("gray", "lightblue","orangered")))
+g <- grid.arrange(grobs=list(p))
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_allIn_euler_037.pdf")),g)
+
+## let's use ggvenn and add rectangle to the venn diagram
+
+a2 <- list(`EpCAM+`=EPCAM_pos,`Any3+`=Any1_pos)
+
+ggvenn(a2,fill_color=c("blue","orangered"), auto_scale=TRUE,show_percentage=FALSE,set_name_size=0,text_size=3.5) +
+  annotate("rect",xmin = -1.3, xmax = 1.2, ymin = -1.05, ymax = 1.05, fill = "gray",alpha=0.3) +
+  annotate("text",x=-0.89,y=0.1,label="EpCAM+") +
+  annotate("text",x=-0.93,y=-0.1,label="(13%)") +
+  annotate("text",x=0.07,y=-0.1,label="(72%)") +
+  annotate("text",x=0.92,y=0.1,label="Any3+") +
+  annotate("text",x=0.94,y=-0.1,label="(3%)") +
+  annotate("text",x=0.9,y=-0.77,label="Negative") +
+  annotate("text",x=0.88,y=-0.87,label="138") +
+  annotate("text",x=0.9,y=-0.97,label="(12%)")
+
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_all_ggvenn_037.pdf")))
+
+
+## 7G: single cell expression of DLL3, SEZ6,  B7H3 in CTCs from pt 02 (recurrent)
+
+##load 002 
+
+scrna.002<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC002.scrna.seurat.final.rds"))
+
+scrna.002.sub <- subset(scrna.002,subset=final_anno=="epithelial")
+
+scrna.002.sub$DLL3_group <- "neg"
+ 
+scrna.002.sub$DLL3_group[which(scrna.002.sub[['RNA']]$data["DLL3",] > 0)] <- "pos" 
+
+
+scrna.002.sub$SEZ6_group <- "neg"
+ 
+scrna.002.sub$SEZ6_group[which(scrna.002.sub[['RNA']]$data["SEZ6",] > 0)] <- "pos" 
+
+
+scrna.002.sub$CD276_group <- "neg"
+scrna.002.sub$CD276_group[which(scrna.002.sub[['RNA']]$data["CD276",] > 0)] <- "pos" 
+ 
+DLL3_pos <- WhichCells(scrna.002.sub, expression=DLL3_group=="pos")
+SEZ6_pos <- WhichCells(scrna.002.sub, expression=SEZ6_group=="pos")
+B7H3_pos <- WhichCells(scrna.002.sub, expression=CD276_group=="pos")
+
+a <- list(`DLL3+`=DLL3_pos,`SEZ6+`=SEZ6_pos,`B7H3+`=B7H3_pos)
+
+## use euler 
+p <- plot(euler(a, shape = "ellipse"),quantities=TRUE,fill = list(fill = c("orangered", "gold","royalblue")))
+g <- grid.arrange(grobs=list(p))
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_allIn_euler_002.pdf")),g)
+
+
+### supplementary figure 7 for 036
+
+## S7D: Show UMAP for the iChip-purified pt 36 With lots of CTCs .  Show the various cell populations  Isolated (remove platelets), and then Expand on the CTC population within  A window. In the window score for DLL3, SEZ6 and B7H3 with dots As above (mosaic)
+
+
+scrna.036<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC036.scrna.seurat.with.anno.rds"))
+
+## remove platelets
+#FeaturePlot(scrna.036,features=c("CD62P","PF4","CD41"))
+scrna.036.sub <- subset(scrna.036,subset=final_anno=="platelet",invert=TRUE)
+
+#DimPlot(scrna.036.sub,group.by = "final_anno")
+
+DimPlot(
+  scrna.036.sub,
+  reduction = "umap",
+  group.by = "final_anno",
+  label.size = 4,
+  label=TRUE,
+  cols=c("neutrophil"="#7CAE00","monocyte"="#008FC4","unknown"="#9999CC","fibroblast"="#00C19A","lymphocyte"="#E68613","epithelial"="#FF3300","endothelial"="#99CCCC")) + theme(legend.position = "none")+ labs(title="Patient A")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_allCell_036_noPlatelet.pdf")))
+
+## CTC only with three labeled
+## assign three groups
+
+scrna.036.sub <- subset(scrna.036.sub,subset=final_anno=="epithelial")
+
+scrna.036.sub$DLL3_group <- "neg"
+ 
+scrna.036.sub$DLL3_group[which(scrna.036.sub[['RNA']]$data["DLL3",] > 0)] <- "pos" 
+
+
+scrna.036.sub$SEZ6_group <- "neg"
+ 
+scrna.036.sub$SEZ6_group[which(scrna.036.sub[['RNA']]$data["SEZ6",] > 0)] <- "pos" 
+
+
+scrna.036.sub$CD276_group <- "neg"
+scrna.036.sub$CD276_group[which(scrna.036.sub[['RNA']]$data["CD276",] > 0)] <- "pos" 
+ 
+
+scrna.036.sub$DLL3_ <- ifelse(scrna.036.sub$DLL3_group=="neg",0,1)
+scrna.036.sub$SEZ6_ <- ifelse(scrna.036.sub$SEZ6_group=="neg",0,1)
+scrna.036.sub$B7H3_ <- ifelse(scrna.036.sub$CD276_group=="neg",0,1)
+
+FeaturePlot3(scrna.036.sub, feature.1 = "DLL3_", feature.2 = "SEZ6_", feature.3 = "B7H3_", pt.size = 0.1, color.range=c(0,1))
+## 2025-07-16 switch color to make it orange for DLL3
+FeaturePlot3(scrna.036.sub, feature.2 = "DLL3_", feature.1 = "SEZ6_", feature.3 = "B7H3_", pt.size = 0.1, color.range=c(0,1))
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_SEZ6_DLL3_B7H3_binary_smallDot.tumorOnly_036.pdf")))
+
+
+## S7E:
+# single cell expression Of DLL3, SEZ6, B7H3 in CTCs from pt 36
+
+DLL3_pos <- WhichCells(scrna.036.sub, expression=DLL3_group=="pos")
+SEZ6_pos <- WhichCells(scrna.036.sub, expression=SEZ6_group=="pos")
+B7H3_pos <- WhichCells(scrna.036.sub, expression=CD276_group=="pos")
+
+a <- list(`DLL3+`=DLL3_pos,`SEZ6+`=SEZ6_pos,`B7H3+`=B7H3_pos)
+
+## use euler with circle
+p <- plot(euler(a, shape = "circle"), quantities = list(type = c("counts", "percent"),round=2, cex=0.8),fill = list(fill = c("orangered", "gold","royalblue")))
+g <- grid.arrange(grobs=list(p))
+
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_SEZ6_DLL3_B7H3_euler_bothCP_differentSize_036_tumorOnly.pdf")),g)
+
+## use euler with eclipse
+p <- plot(euler(a, shape = "ellipse"), quantities = list(type = c("counts", "percent"),round=2, cex=0.8),fill = list(fill = c("orangered", "gold","royalblue")))
+g <- grid.arrange(grobs=list(p))
+
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_SEZ6_DLL3_B7H3_euler_bothCP_ellipse_036_tumorOnly.pdf")),g)
+## try ggvenn
+
+ggvenn(a,fill_color = c("orangered", "gold","royalblue"))
+
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_SEZ6_DLL3_B7H3_ggvenn_bothCP_036_tumorOnly.pdf")))
+
+## S7F: 
+# single cell expression Of EpCAM vs “any of DLL3, SEZ6, B7H3” Out of denominator of CNV+ cells  in CTCs from pt 36
+
+EPCAM_pos <- WhichCells(scrna.036.sub, expression=EPCAM > 0)
+Any1_pos <- WhichCells(scrna.036.sub, expression=CD276_group=="pos" | DLL3_group=="pos" | SEZ6_group=="pos")
+all <- colnames(scrna.036.sub)
+
+a <- list(`negative`=all,`EpCAM+`=EPCAM_pos,`DLL3/SEZ6/B7H3+`=Any1_pos)
+
+p <- plot(euler(a, shape = "circle"), quantities = list(type = c("counts", "percent")),fill = list(fill = c("gray", "lightblue","orangered")))
+g <- grid.arrange(grobs=list(p))
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_allIn_euler_036.pdf")),g)
+
+## let's use ggvenn and add rectangle to the venn diagram
+
+a2 <- list(`EpCAM+`=EPCAM_pos,`Any3+`=Any1_pos)
+
+ggvenn(a2,fill_color=c("blue","orangered"), auto_scale=TRUE,show_percentage=FALSE,set_name_size=0,text_size=3.5) +
+  annotate("rect",xmin = -1.3, xmax = 1.2, ymin = -1.05, ymax = 1.05, fill = "gray",alpha=0.3) +
+  annotate("text",x=-0.86,y=0.1,label="EpCAM+") +
+  annotate("text",x=-0.87,y=-0.1,label="(26%)") +
+  annotate("text",x=0.12,y=-0.1,label="(55%)") +
+  annotate("text",x=0.92,y=0.1,label="Any3+") +
+  annotate("text",x=0.9,y=-0.1,label="(6%)") +
+  annotate("text",x=0.9,y=-0.77,label="Negative") +
+  annotate("text",x=0.88,y=-0.87,label="6") +
+  annotate("text",x=0.9,y=-0.97,label="(13%)")
+
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_all_ggvenn_036.pdf")))
+
+
+### S7G: all in for 002
+
+scrna.002<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC002.scrna.seurat.final.rds"))
+
+scrna.002.sub <- subset(scrna.002,subset=final_anno=="epithelial")
+
+scrna.002.sub$DLL3_group <- "neg"
+ 
+scrna.002.sub$DLL3_group[which(scrna.002.sub[['RNA']]$data["DLL3",] > 0)] <- "pos" 
+
+
+scrna.002.sub$SEZ6_group <- "neg"
+ 
+scrna.002.sub$SEZ6_group[which(scrna.002.sub[['RNA']]$data["SEZ6",] > 0)] <- "pos" 
+
+
+scrna.002.sub$CD276_group <- "neg"
+scrna.002.sub$CD276_group[which(scrna.002.sub[['RNA']]$data["CD276",] > 0)] <- "pos" 
+ 
+EPCAM_pos <- WhichCells(scrna.002.sub, expression=EPCAM > 0)
+Any1_pos <- WhichCells(scrna.002.sub, expression=CD276_group=="pos" | DLL3_group=="pos" | SEZ6_group=="pos")
+all <- colnames(scrna.002.sub)
+
+a <- list(`negative`=all,`EpCAM+`=EPCAM_pos,`DLL3/SEZ6/B7H3+`=Any1_pos)
+
+p <- plot(euler(a, shape = "circle"), quantities = list(type = c("counts", "percent")),fill = list(fill = c("gray", "lightblue","orangered")))
+g <- grid.arrange(grobs=list(p))
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_allIn_euler_002.pdf")),g)
+
+## let's use ggvenn and add rectangle to the venn diagram
+
+a2 <- list(`EpCAM+`=EPCAM_pos,`Any3+`=Any1_pos)
+
+ggvenn(a2,fill_color=c("blue","orangered"), auto_scale=TRUE,show_percentage=FALSE,set_name_size=0,text_size=3.5) +
+  annotate("rect",xmin = -1.3, xmax = 1.2, ymin = -1.05, ymax = 1.05, fill = "gray",alpha=0.3) +
+  annotate("text",x=-1,y=0.1,label="EpCAM+") +
+  annotate("text",x=-1,y=-0.1,label="(9.5%)") +
+  annotate("text",x=0,y=-0.1,label="(76.2%)") +
+  annotate("text",x=0.98,y=0.1,label="Any3+") +
+  annotate("text",x=1,y=-0.1,label="(9.5%)") +
+  annotate("text",x=0.97,y=-0.77,label="Negative") +
+  annotate("text",x=0.94,y=-0.87,label="1") +
+  annotate("text",x=0.97,y=-0.97,label="(4.8%)")
+
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_all_ggvenn_002.pdf")))
+
+
+```
+
+## Step 7: NE signatures
+
+```{r}
+
+##  on 06/12/2025
+## GSEA I: What are the expression patterns of neuroendocrine signatures in cells expressing DLL3, SEZ6, and B7H3?
+### A: get DLL3+only, SEZ6_+only, B7H3+only, 2or3+,TripleNegative for different NE signatures (and different subsets)
+
+#GSEA II: What are the expression patterns of neuroendocrine signatures in EpCAM-only, DLL3-only, and EpCAM/DLL3 double-positive cells?
+
+### A: get three subsets as described above
+
+epi_sub <- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/","scrna.obj.seurat.withanno.3sample.tumorOnly.rds"))
+
+## get NE signatures
+
+### NE Alshalafa
+
+NE_Alshalalfa <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Alshalalfa",colNames = FALSE)
+
+NE_Alshalalfa_All <- NE_Alshalalfa$X1
+
+NE_Alshalalfa_UP <- NE_Alshalalfa$X1[which(NE_Alshalalfa$X2=="UP")]
+
+NE_Alshalalfa_DOWN <- NE_Alshalalfa$X1[which(NE_Alshalalfa$X2=="DOWN")]
+
+NE_Alshalalfa <- list(Alshalalfa_All=NE_Alshalalfa_All,Alshalalfa_UP=NE_Alshalalfa_UP,Alshalalfa_DOWN=NE_Alshalalfa_DOWN)
+
+epi_sub <- AddModuleScore_UCell(epi_sub, features = NE_Alshalalfa, ncores=4, name = "")
+
+epi_sub$group_gsea <- factor(epi_sub$group_gsea,levels=c("DLL3+Only","SEZ6+Only","B7H3+Only","2or3+","triple_negative"))
+
+VlnPlot(epi_sub, features=names(NE_Alshalalfa), group.by="group_gsea",pt.size = 0, ncol=3)
+
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_NE_signature_Alshalalfa.pdf")))
+
+## NE Balanis
+
+NE_Balanis <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Balanis",colNames = FALSE)[,1]
+
+
+## NE Beltran
+
+NE_Beltran <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Beltran",colNames = FALSE)
+
+NE_Beltran_All <- NE_Beltran$X1
+
+NE_Beltran_UP <- NE_Beltran$X1[which(NE_Beltran$X2=="UP")]
+
+NE_Beltran_DOWN <- NE_Beltran$X1[which(NE_Beltran$X2=="DOWN")]
+
+
+
+## NE Kumar
+
+NE_Kumar <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Kumar",colNames = FALSE)[,1]
+
+
+## NE Tsai
+
+NE_Tsai69 <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Tsai69",colNames = FALSE)
+
+NE_Tsai306 <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Tsai306",colNames = FALSE)
+
+NE_Tsai <- rbind(NE_Tsai69,NE_Tsai306)
+
+NE_Tsai_All <- NE_Tsai$X1
+
+NE_Tsai_UP <- NE_Tsai$X1[which(NE_Tsai$X2=="UP")]
+
+NE_Tsai_DOWN <- NE_Tsai$X1[which(NE_Tsai$X2=="DOWN")]
+
+
+### put all list together
+
+NE <- list(Alshalalfa_All=NE_Alshalalfa_All,Alshalalfa_UP=NE_Alshalalfa_UP,Alshalalfa_DOWN=NE_Alshalalfa_DOWN,
+           Balanis=NE_Balanis,
+           Beltran_All=NE_Beltran_All,Beltran_UP=NE_Beltran_UP,Beltran_DOWN=NE_Beltran_DOWN,
+           Kumar=NE_Kumar,
+           Tsai_All=NE_Tsai_All,Tsai_UP=NE_Tsai_UP,Tsai_DOWN=NE_Tsai_DOWN)
+
+
+epi_sub <- AddModuleScore_UCell(epi_sub, features = NE, ncores=4, name = "")
+
+epi_sub$group_gsea <- factor(epi_sub$group_gsea,levels=c("DLL3+Only","SEZ6+Only","B7H3+Only","2or3+","triple_negative"))
+
+VlnPlot(epi_sub, features=names(NE), group.by="group_gsea",pt.size = 0, ncol=4) &
+  theme(
+    axis.text.x = element_text(size = 6), 
+    axis.text.y = element_text(size = 6), 
+    axis.title.x = element_blank(),
+    plot.title = element_text(size = 8, face = "bold", hjust = 0.5) 
+  )
+
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_NE_signature_GSEA1.pdf")))
+
+
+## GSEA II
+
+data1 <- FetchData(epi_sub, vars = c("DLL3","EPCAM"))
+
+epi_sub$epcam_gsea2 <- "otherTumorCell"
+
+epi_sub$epcam_gsea2[which(data1$DLL3 >0 & data1$EPCAM==0)] <- "DLL3+Only"
+
+epi_sub$epcam_gsea2[which(data1$DLL3 ==0 & data1$EPCAM>0)] <- "EPCAM+Only"
+
+epi_sub$epcam_gsea2[which(data1$DLL3 >0 & data1$EPCAM>0)] <- "EPCAM&DLL3+"
+
+
+epi_sub$epcam_gsea2 <- factor(epi_sub$epcam_gsea2,levels=c("EPCAM+Only","DLL3+Only","EPCAM&DLL3+","otherTumorCell"))
+
+VlnPlot(epi_sub, features=names(NE), group.by="epcam_gsea2",pt.size = 0, ncol=4) &
+  theme(
+    axis.text.x = element_text(size = 6), 
+    axis.text.y = element_text(size = 6), 
+    axis.title.x = element_blank(),
+    plot.title = element_text(size = 8, face = "bold", hjust = 0.5) 
+  )
+
+ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_NE_signature_GSEA2_EPCAM.pdf")))
+
+
+```
+
+## Step 8: coexistence of DLL3 isoforms
+
+```{r}
+
+## 036
+scrna.036<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC036.scrna.seurat.with.anno.rds"))
+
+## extract tumor/epithelials only
+
+tumorCells <- gsub("MGHSCLC036_","CB:Z:",WhichCells(scrna.036,expression=final_anno=="epithelial"))
+
+write(tumorCells,file=(paste0("../results/MGHSCLC002031036037/text/MGHSCLC036.cell_barcodes.txt")))
+
+## 037
+scrna.037<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC037.scrna.seurat.with.anno.rds"))
+
+## extract tumor/epithelials only
+
+tumorCells <- gsub("MGHSCLC037_","CB:Z:",WhichCells(scrna.037,expression=final_anno=="epithelial"))
+
+write(tumorCells,file=(paste0("../results/MGHSCLC002031036037/text/MGHSCLC037.cell_barcodes.txt")))
+
+
+```
+
+
+### Step 9: revision
+
+```{r}
+
+### 1. save annotation as processed data for data deposit
+## 002
+scrna.002<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC002.scrna.seurat.final.rds"))
+
+anno.002 <- as.data.frame(scrna.002@meta.data[,c("orig.ident","final_anno")])
+
+anno.002$cell_barcode <- gsub("MGHSCLC002_","",rownames(anno.002))
+
+colnames(anno.002) <- c("Sample_ID","Cell_Type","Cell_Barcode")
+
+anno.002 <- anno.002[,c("Sample_ID","Cell_Barcode","Cell_Type")]
+
+write.table(anno.002,"../results/MGHSCLC002031036037/text/MGHSCLC002.cell_annotation.txt",row.names=FALSE,sep="\t",quote=FALSE)
+
+## 036
+scrna.036<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC036.scrna.seurat.with.anno.rds"))
+
+anno.036 <- as.data.frame(scrna.036@meta.data[,c("orig.ident","final_anno")])
+
+anno.036$cell_barcode <- gsub("MGHSCLC036_","",rownames(anno.036))
+
+colnames(anno.036) <- c("Sample_ID","Cell_Type","Cell_Barcode")
+
+anno.036 <- anno.036[,c("Sample_ID","Cell_Barcode","Cell_Type")]
+
+write.table(anno.036,"../results/MGHSCLC002031036037/text/MGHSCLC036.cell_annotation.txt",row.names=FALSE,sep="\t",quote=FALSE)
+
+## 037
+scrna.037<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC037.scrna.seurat.with.anno.rds"))
+
+anno.037 <- as.data.frame(scrna.037@meta.data[,c("orig.ident","final_anno")])
+
+anno.037$cell_barcode <- gsub("MGHSCLC037_","",rownames(anno.037))
+
+colnames(anno.037) <- c("Sample_ID","Cell_Type","Cell_Barcode")
+
+anno.037 <- anno.037[,c("Sample_ID","Cell_Barcode","Cell_Type")]
+
+write.table(anno.037,"../results/MGHSCLC002031036037/text/MGHSCLC037.cell_annotation.txt",row.names=FALSE,sep="\t",quote=FALSE)
+
+
+### 2. false positive in CTCs
+
+## NOTCH pathway as baits
+
+## reported co-expressed gene in Notch pathway
+
+cogenes <- c("NOTCH1", "NOTCH2", "NOTCH3", "NOTCH4", "HES1", "HEY1", "JAG1","JAG2")
+
+## load data
+
+scrna.002<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC002.scrna.seurat.final.rds"))
+
+scrna.002.sub <- subset(scrna.002,subset=final_anno=="epithelial")
+
+count_matrix.002 <- GetAssayData(scrna.002.sub, layer = "counts")
+
+gene_counts.002 <- as.data.frame(t(as.matrix(count_matrix.002[rownames(count_matrix.002) %in% c(cogenes,"DLL3"), ])))
+
+gene_counts.002$DLL3_group <- ifelse(gene_counts.002$DLL3>0,"pos","neg")
+
+gene_counts.002$DLL3_coNum <- rowSums(gene_counts.002[,cogenes] > 0)
+
+gene_counts.002$sample <- "MGHSCLC002"
+
+scrna.036<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC036.scrna.seurat.with.anno.rds"))
+
+scrna.036.sub <- subset(scrna.036,subset=final_anno=="epithelial")
+
+count_matrix.036 <- GetAssayData(scrna.036.sub, layer = "counts")
+
+gene_counts.036 <- as.data.frame(t(as.matrix(count_matrix.036[rownames(count_matrix.036) %in% c(cogenes,"DLL3"), ])))
+
+gene_counts.036$DLL3_group <- ifelse(gene_counts.036$DLL3>0,"pos","neg")
+
+gene_counts.036$DLL3_coNum <- rowSums(gene_counts.036[,cogenes] > 0)
+
+gene_counts.036$sample <- "MGHSCLC036"
+
+
+
+scrna.037<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC037.scrna.seurat.with.anno.rds"))
+
+scrna.037.sub <- subset(scrna.037,subset=final_anno=="epithelial")
+
+count_matrix.037 <- GetAssayData(scrna.037.sub, layer = "counts")
+
+gene_counts.037 <- as.data.frame(t(as.matrix(count_matrix.037[rownames(count_matrix.037) %in% c(cogenes,"DLL3"), ])))
+
+gene_counts.037$DLL3_group <- ifelse(gene_counts.037$DLL3>0,"pos","neg")
+
+gene_counts.037$DLL3_coNum <- rowSums(gene_counts.037[,cogenes] > 0)
+
+gene_counts.037$sample <- "MGHSCLC037"
+
+## merge
+
+gene_counts <- rbind(gene_counts.002, gene_counts.036,gene_counts.037)
+
+for (nco in 1:8){
+gene_counts$DLL3_co <- as.character(gene_counts$DLL3_group)
+ 
+gene_counts$DLL3_co[which(gene_counts$DLL3_group=="neg" & gene_counts$DLL3_coNum < nco)] <- "true_neg" 
+
+gene_counts$DLL3_co[which(gene_counts$DLL3_group=="neg" & gene_counts$DLL3_coNum >=nco)] <- "false_neg" 
+
+gene_counts$DLL3_co <- factor(gene_counts$DLL3_co, levels = c("true_neg","false_neg","pos"))
+
+
+## plot
+
+samType <- as.data.frame(table(gene_counts$sample,gene_counts$DLL3_co))
+colnames(samType) <- c("Sample","DLL3","Freq")
+samType$Value <- samType$Freq / ave(samType$Freq, samType$Sample, FUN = sum) * 100
+
+reordered_data <- samType %>%
+  filter(DLL3 == "pos") %>%
+  arrange(Value) %>%
+  mutate(Sample = factor(Sample, levels = Sample))
+
+samType$Sample <- factor(samType$Sample,levels=reordered_data$Sample)
+
+ggplot(samType, aes(x = Sample, y = Value, fill = DLL3)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent,expand = c(0, 0)) +
+  scale_x_discrete(expand = c(0, 0)) +
+  theme_bw() + theme(axis.text.x = element_text(angle = 45,hjust = 1)) +
+  labs(title = paste0("DLL3 expression per sample (false_neg: >= ",nco," co-exp genes)"), y = "Proportion", x = "")
+
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_stackedbar_by_DLL3_using_",nco,"_coexp_by_sample.pdf")))
+
+}
+
+### 3: EpCAM, CK and DLL3 
+
+## 002
+
+dir.create("../results/MGHSCLC002031036037/revision")
+
+sample <-"MGHSCLC002"
+
+scrna.002<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC002.scrna.seurat.final.rds"))
+
+UMAPPlot(scrna.002,group.by="final_anno")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_UMAP_all_cell_types.pdf")))
+
+for (ck in c("DLL3","EPCAM","KRT8","KRT18","KRT19")){
+  FeaturePlot(scrna.002,features=ck, label=TRUE)
+  ggsave(here(paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_UMAP_",ck,"_in_all_cell_types.pdf")))
+  
+  VlnPlot(scrna.002,features=ck,group.by="final_anno")
+  ggsave(here(paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_violin_",ck,"_in_all_cell_types.pdf")))
+}
+
+## three in one plot
+epi_sub <- subset(scrna.002,subset=final_anno=="epithelial")
+
+## assign DLL3 pos/neg group
+epi_sub$DLL3_group <- "neg"
+ 
+epi_sub$DLL3_group[which(epi_sub[['RNA']]$data["DLL3",] > 0)] <- "pos" 
+epi_sub$DLL3_group <- factor(epi_sub$DLL3_group)
+
+
+## assign EPCAM pos/neg group
+epi_sub$EPCAM_group <- "neg"
+ 
+epi_sub$EPCAM_group[which(epi_sub[['RNA']]$data["EPCAM",] > 0)] <- "pos" 
+epi_sub$EPCAM_group <- factor(epi_sub$EPCAM_group)
+
+
+## define CK +/-
+epi_sub$CK_group <- "neg"
+expr_matrix <- FetchData(epi_sub, vars = c("KRT8","KRT18","KRT19"))
+epi_sub$CK_group[which(rowSums(expr_matrix > 0) > 0)] <- "pos"
+epi_sub$CK_group <- factor(epi_sub$CK_group)
+
+## first plot dots with integrated color
+epi_sub$DLL3_ <- ifelse(epi_sub$DLL3_group=="neg",0,1)
+epi_sub$EPCAM_ <- ifelse(epi_sub$EPCAM_group=="neg",0,1)
+epi_sub$CK_ <- ifelse(epi_sub$CK_group=="neg",0,1)
+
+df <- as.data.frame(FetchData(epi_sub,c("umap_1","umap_2","DLL3_","EPCAM_","CK_","sample")))
+
+df_grouped <- df %>%
+  group_by(DLL3_, EPCAM_, CK_) %>%
+  mutate(group = cur_group_id()) %>%
+  ungroup() %>% as.data.frame()
+
+### old in MGH cohort
+#     DLL3_ EPCAM_ CK_ group
+# 1       0     0     0     1
+# 3       1     0     0     5
+# 6       0     0     1     2
+# 8       0     1     1     4
+# 19      1     0     1     6
+# 23      0     1     0     3
+# 47      1     1     0     7
+# 100     1     1     1     8
+
+## in 002
+
+# > unique(df_grouped[,c(3,4,5,7)])
+#    DLL3_ EPCAM_ CK_ group
+# 1      0      1   1     2
+# 5      0      0   1     1
+# 18     1      1   1     3
+
+### try different color V: 
+
+r_d <- c(1,0.647,0) #"#FFA500"
+r_c <- c(0.62,0.35,0.68) # "#9E59AD"
+r_e <- c(0.39,0.72,1) #"#63B8FF"
+
+
+ref_col <- data.frame(group=1:3,col_val=c(rgb(0.62,0.35,0.68), # group 1
+                                         rgb(0.505, 0.535, 0.84), # 2
+                                         rgb(0.67, 0.57, 0.56) # 3
+                                         ))
+
+df_col <- merge(df_grouped,ref_col)
+
+data_col <- c("1"="#9E59AD","2"="#8188D6","3"= "#AB918F")
+
+max_x <- max(df_grouped$umap_1)
+max_y <- max(df_grouped$umap_2)
+legend_df <- data.frame(
+  x = max_x,
+  y = c(max_y, max_y+0.05,max_y+0.1),
+  label = c('DLL3', 'EPCAM', 'CK'),
+  color=c("#FFA500", "#63B8FF","#9E59AD") # The desired colors for the legend
+)
+
+p <- ggplot(df_col,aes(x=umap_1,y=umap_2)) + geom_point(aes(color=factor(group)),size=0.5,stroke=0.1) + 
+  scale_colour_manual(values=data_col,guide="none") + theme_minimal() +
+  theme(panel.border = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(color = "black"))  
+
+ 
+p+
+  geom_point(data = legend_df,
+             aes(x = x-0.04, y = y, color = label ),
+             size = 3) +
+  geom_text(data = legend_df,
+            aes(x = x - 0.03, y = y, label = label),
+            hjust = 0,size=3) +# get all elements but need to change the color for new legend at this layer
+  scale_color_manual(name="",values = c(data_col,setNames(legend_df$color, legend_df$label)) ,guide="none")  
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_UMAP_EPCAM_DLL3_CK_binary_tumorOnly_withLabel_newColor_5.pdf")))
+
+### draw Venn diagram for these three gene or sets as well
+
+DLL3_pos <- WhichCells(epi_sub, expression=DLL3_group=="pos")
+EPCAM_pos <- WhichCells(epi_sub, expression=EPCAM_group=="pos")
+CK_pos <- WhichCells(epi_sub, expression=CK_group=="pos")
+
+a <- list(`DLL3+`=DLL3_pos,`EPCAM+`=EPCAM_pos,`CK+`=CK_pos)
+
+## use euler 
+p <- plot(euler(a, shape = "ellipse"), quantities = list(type = c("counts", "percent")),fill = list(fill = c("#FFA500", "#63B8FF","#9E59AD"))) 
+g <- grid.arrange(grobs=list(p),top=textGrob(sample, gp = gpar(fontface = "bold")))
+ggsave((paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_venn_EPCAM_DLL3_CK_euler_bothCP_differentSize.pdf")),g)
+
+### 036
+
+
+scrna.036<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC036.scrna.seurat.with.anno.rds"))
+
+sample <-"MGHSCLC036"
+
+scrna.036 <- subset(scrna.036,subset=final_anno=="unknown",invert=TRUE)
+
+UMAPPlot(scrna.036,group.by="final_anno")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_UMAP_all_cell_types.pdf")))
+
+for (ck in c("DLL3","EPCAM","KRT8","KRT18","KRT19")){
+  FeaturePlot(scrna.036,features=ck, label=TRUE)
+  ggsave(here(paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_UMAP_",ck,"_in_all_cell_types.pdf")))
+  
+  VlnPlot(scrna.036,features=ck,group.by="final_anno")
+  ggsave(here(paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_violin_",ck,"_in_all_cell_types.pdf")))
+}
+
+## three in one plot
+epi_sub <- subset(scrna.036,subset=final_anno=="epithelial")
+
+## assign DLL3 pos/neg group
+epi_sub$DLL3_group <- "neg"
+ 
+epi_sub$DLL3_group[which(epi_sub[['RNA']]$data["DLL3",] > 0)] <- "pos" 
+epi_sub$DLL3_group <- factor(epi_sub$DLL3_group)
+
+
+## assign EPCAM pos/neg group
+epi_sub$EPCAM_group <- "neg"
+ 
+epi_sub$EPCAM_group[which(epi_sub[['RNA']]$data["EPCAM",] > 0)] <- "pos" 
+epi_sub$EPCAM_group <- factor(epi_sub$EPCAM_group)
+
+
+## define CK +/-
+epi_sub$CK_group <- "neg"
+expr_matrix <- FetchData(epi_sub, vars = c("KRT8","KRT18","KRT19"))
+epi_sub$CK_group[which(rowSums(expr_matrix > 0) > 0)] <- "pos"
+epi_sub$CK_group <- factor(epi_sub$CK_group)
+
+## first plot dots with integrated color
+epi_sub$DLL3_ <- ifelse(epi_sub$DLL3_group=="neg",0,1)
+epi_sub$EPCAM_ <- ifelse(epi_sub$EPCAM_group=="neg",0,1)
+epi_sub$CK_ <- ifelse(epi_sub$CK_group=="neg",0,1)
+
+df <- as.data.frame(FetchData(epi_sub,c("umap_1","umap_2","DLL3_","EPCAM_","CK_","sample")))
+
+df_grouped <- df %>%
+  group_by(DLL3_, EPCAM_, CK_) %>%
+  mutate(group = cur_group_id()) %>%
+  ungroup() %>% as.data.frame()
+
+### old in MGH cohort
+#     DLL3_ EPCAM_ CK_ group
+# 1       0     0     0     1
+# 3       1     0     0     5
+# 6       0     0     1     2
+# 8       0     1     1     4
+# 19      1     0     1     6
+# 23      0     1     0     3
+# 47      1     1     0     7
+# 100     1     1     1     8
+
+## in 036
+
+# > unique(df_grouped[,c(3,4,5,7)])
+#    DLL3_ EPCAM_ CK_ group
+# 1      1      1   1     7.  --> 8
+# 2      0      1   1     4 
+# 3      0      1   0     3
+# 4      1      0   1     5. ---> 6
+# 7      1      1   0     6. ---->7
+# 9      0      0   1     2. 
+# 24     0      0   0     1
+
+### try different color V: 
+
+r_d <- c(1,0.647,0) #"#FFA500"
+r_c <- c(0.62,0.35,0.68) # "#9E59AD"
+r_e <- c(0.39,0.72,1) #"#63B8FF"
+
+
+ref_col <- data.frame(group=1:7,col_val=c(rgb(1,1,1), # group 1
+                                         rgb(0.62,0.35,0.68), # 2
+                                         rgb(0.39,0.72,1), # 3
+                                         rgb(0.505, 0.535, 0.84), #4: colMeans(rbind(r_s,r_b))
+                                         rgb(0.81, 0.4985, 0.34), #5
+                                         rgb(0.6950, 0.6835, 0.5), #6
+                                         rgb(0.67, 0.57, 0.56) #7
+                                         ))
+
+df_col <- merge(df_grouped,ref_col)
+
+data_col <- c("1"="#FFFFFF","2"="#9E59AD","3"="#63B8FF","4"="#8188D6","5"="#CF7F57","6"="#B1AE80","7"= "#AB918F")
+
+
+max_x <- max(df_grouped$umap_1)
+max_y <- max(df_grouped$umap_2)
+legend_df <- data.frame(
+  x = max_x,
+  y = c(max_y, max_y+0.05,max_y+0.1),
+  label = c('DLL3', 'EPCAM', 'CK'),
+  color=c("#FFA500", "#63B8FF","#9E59AD") # The desired colors for the legend
+)
+
+p <- ggplot(df_col,aes(x=umap_1,y=umap_2)) + geom_point(aes(color=factor(group)),size=0.5,stroke=0.1) + 
+  scale_colour_manual(values=data_col,guide="none") + theme_minimal() +
+  theme(panel.border = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(color = "black"))  
+
+ 
+p+
+  geom_point(data = legend_df,
+             aes(x = x-1.04, y = y, color = label ),
+             size = 3) +
+  geom_text(data = legend_df,
+            aes(x = x - 1.02, y = y, label = label),
+            hjust = 0,size=3) +# get all elements but need to change the color for new legend at this layer
+  scale_color_manual(name="",values = c(data_col,setNames(legend_df$color, legend_df$label)) ,guide="none")  
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_UMAP_EPCAM_DLL3_CK_binary_tumorOnly_withLabel_newColor_5.pdf")))
+
+### draw Venn diagram for these three gene or sets as well
+
+DLL3_pos <- WhichCells(epi_sub, expression=DLL3_group=="pos")
+EPCAM_pos <- WhichCells(epi_sub, expression=EPCAM_group=="pos")
+CK_pos <- WhichCells(epi_sub, expression=CK_group=="pos")
+
+a <- list(`DLL3+`=DLL3_pos,`EPCAM+`=EPCAM_pos,`CK+`=CK_pos)
+
+## use euler 
+p <- plot(euler(a, shape = "circle"), quantities = list(type = c("counts", "percent")),fill = list(fill = c("#FFA500", "#63B8FF","#9E59AD"))) 
+g <- grid.arrange(grobs=list(p),top=textGrob(sample, gp = gpar(fontface = "bold")))
+ggsave((paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_venn_EPCAM_DLL3_CK_euler_bothCP_differentSize.pdf")),g)
+
+### weired
+
+## try different plot
+library(VennDiagram)
+venn.diagram(
+x = list(`DLL3+`=DLL3_pos,`EPCAM+`=EPCAM_pos,`CK+`=CK_pos),
+category.names = c("DLL3+", "EPCAM+", "CK+"),
+col = "transparent",
+fill = c("#FFA500", "#63B8FF","#9E59AD"),
+alpha = 0.30,
+print.mode=c("raw","percent"),
+filename = paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_venn_EPCAM_DLL3_CK_euler_bothCP_sameSize.tiff"),
+imagetype="tiff",
+output=TRUE
+)
+
+
+### 037
+
+scrna.037<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC037.scrna.seurat.with.anno.rds"))
+
+sample <-"MGHSCLC037"
+
+scrna.037 <- subset(scrna.037,subset=final_anno=="platelet",invert=TRUE)
+
+UMAPPlot(scrna.037,group.by="final_anno")
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_UMAP_all_cell_types.pdf")))
+
+for (ck in c("DLL3","EPCAM","KRT8","KRT18","KRT19")){
+  FeaturePlot(scrna.037,features=ck, label=TRUE)
+  ggsave(here(paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_UMAP_",ck,"_in_all_cell_types.pdf")))
+  
+  VlnPlot(scrna.037,features=ck,group.by="final_anno")
+  ggsave(here(paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_violin_",ck,"_in_all_cell_types.pdf")))
+}
+
+## three in one plot
+epi_sub <- subset(scrna.037,subset=final_anno=="epithelial")
+
+## assign DLL3 pos/neg group
+epi_sub$DLL3_group <- "neg"
+ 
+epi_sub$DLL3_group[which(epi_sub[['RNA']]$data["DLL3",] > 0)] <- "pos" 
+epi_sub$DLL3_group <- factor(epi_sub$DLL3_group)
+
+
+## assign EPCAM pos/neg group
+epi_sub$EPCAM_group <- "neg"
+ 
+epi_sub$EPCAM_group[which(epi_sub[['RNA']]$data["EPCAM",] > 0)] <- "pos" 
+epi_sub$EPCAM_group <- factor(epi_sub$EPCAM_group)
+
+
+## define CK +/-
+epi_sub$CK_group <- "neg"
+expr_matrix <- FetchData(epi_sub, vars = c("KRT8","KRT18","KRT19"))
+epi_sub$CK_group[which(rowSums(expr_matrix > 0) > 0)] <- "pos"
+epi_sub$CK_group <- factor(epi_sub$CK_group)
+
+## first plot dots with integrated color
+epi_sub$DLL3_ <- ifelse(epi_sub$DLL3_group=="neg",0,1)
+epi_sub$EPCAM_ <- ifelse(epi_sub$EPCAM_group=="neg",0,1)
+epi_sub$CK_ <- ifelse(epi_sub$CK_group=="neg",0,1)
+
+df <- as.data.frame(FetchData(epi_sub,c("umap_1","umap_2","DLL3_","EPCAM_","CK_","sample")))
+
+df_grouped <- df %>%
+  group_by(DLL3_, EPCAM_, CK_) %>%
+  mutate(group = cur_group_id()) %>%
+  ungroup() %>% as.data.frame()
+
+### old in MGH cohort
+#     DLL3_ EPCAM_ CK_ group
+# 1       0     0     0     1
+# 3       1     0     0     5
+# 6       0     0     1     2
+# 8       0     1     1     4
+# 19      1     0     1     6
+# 23      0     1     0     3
+# 47      1     1     0     7
+# 100     1     1     1     8
+
+## in 037
+
+# > unique(df_grouped[,c(3,4,5,7)])
+#     DLL3_ EPCAM_ CK_ group
+# 1       0      1   1     4
+# 2       0      0   0     1
+# 3       1      1   1     8
+# 14      0      1   0     3
+# 18      1      1   0     7
+# 40      0      0   1     2
+# 140     1      0   0     5
+# 186     1      0   1     6
+
+### try different color V: 
+
+r_d <- c(1,0.647,0) #"#FFA500"
+r_c <- c(0.62,0.35,0.68) # "#9E59AD"
+r_e <- c(0.39,0.72,1) #"#63B8FF"
+
+
+ref_col <- data.frame(group=1:7,col_val=c(rgb(1,1,1), # group 1
+                                         rgb(0.62,0.35,0.68), # 2
+                                         rgb(0.39,0.72,1), # 3
+                                         rgb(0.505, 0.535, 0.84), #4: colMeans(rbind(r_s,r_b))
+                                         rgb(0.81, 0.4985, 0.34), #5
+                                         rgb(0.6950, 0.6835, 0.5), #6
+                                         rgb(0.67, 0.57, 0.56) #7
+                                         ))
+
+df_col <- merge(df_grouped,ref_col)
+
+data_col <- c("1"="#FFFFFF","2"="#9E59AD","3"="#63B8FF","4"="#8188D6","5"="#CF7F57","6"="#B1AE80","7"= "#AB918F")
+
+
+max_x <- max(df_grouped$umap_1)
+max_y <- max(df_grouped$umap_2)
+legend_df <- data.frame(
+  x = max_x,
+  y = c(max_y, max_y-0.5,max_y-1),
+  label = c('DLL3', 'EPCAM', 'CK'),
+  color=c("#FFA500", "#63B8FF","#9E59AD") # The desired colors for the legend
+)
+
+p <- ggplot(df_col,aes(x=umap_1,y=umap_2)) + geom_point(aes(color=factor(group)),size=0.5,stroke=0.1) + 
+  scale_colour_manual(values=data_col,guide="none") + theme_minimal() +
+  theme(panel.border = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(color = "black"))  
+
+ 
+p+
+  geom_point(data = legend_df,
+             aes(x = x-1, y = y, color = label ),
+             size = 3) +
+  geom_text(data = legend_df,
+            aes(x = x - 0.8, y = y, label = label),
+            hjust = 0,size=3) +# get all elements but need to change the color for new legend at this layer
+  scale_color_manual(name="",values = c(data_col,setNames(legend_df$color, legend_df$label)) ,guide="none")  
+
+ggsave(here(paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_UMAP_EPCAM_DLL3_CK_binary_tumorOnly_withLabel_newColor_5.pdf")))
+
+### draw Venn diagram for these three gene or sets as well
+
+DLL3_pos <- WhichCells(epi_sub, expression=DLL3_group=="pos")
+EPCAM_pos <- WhichCells(epi_sub, expression=EPCAM_group=="pos")
+CK_pos <- WhichCells(epi_sub, expression=CK_group=="pos")
+
+a <- list(`DLL3+`=DLL3_pos,`EPCAM+`=EPCAM_pos,`CK+`=CK_pos)
+
+## use euler 
+p <- plot(euler(a, shape = "ellipse"), quantities = list(type = c("counts", "percent")),fill = list(fill = c("#FFA500", "#63B8FF","#9E59AD"))) 
+g <- grid.arrange(grobs=list(p),top=textGrob(sample, gp = gpar(fontface = "bold")))
+ggsave((paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_venn_EPCAM_DLL3_CK_euler_bothCP_differentSize.pdf")),g)
+
+### complicated
+
+## try different plot
+library(VennDiagram)
+venn.diagram(
+x = list(`DLL3+`=DLL3_pos,`EPCAM+`=EPCAM_pos,`CK+`=CK_pos),
+category.names = c("DLL3+", "EPCAM+", "CK+"),
+col = "transparent",
+fill = c("#FFA500", "#63B8FF","#9E59AD"),
+alpha = 0.30,
+print.mode=c("raw","percent"),
+filename = paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_venn_EPCAM_DLL3_CK_euler_bothCP_sameSize.tiff"),
+imagetype="tiff",
+output=TRUE
+)
+
+### GSEA DLL3+ vs DLL3-
+### MGHSCLC037 only with large number of tumor cells
+
+scrna.037<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC037.scrna.seurat.with.anno.rds"))
+
+
+scrna.037 <- subset(scrna.037,subset=final_anno=="epithelial")
+
+## assign DLL3 pos/neg group
+scrna.037$DLL3_group <- "neg"
+ 
+scrna.037$DLL3_group[which(scrna.037[['RNA']]$data["DLL3",] > 0)] <- "pos" 
+scrna.037$DLL3_group <- factor(scrna.037$DLL3_group)
+
+sample <- "MGHSCLC037"
+### load pathway signatures
+
+
+proliferation <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="proliferation",colNames = FALSE)
+stemness <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="stemness",colNames = FALSE)
+quiescence <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="quiescence",colNames = FALSE)
+metastasis <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="metastasis",colNames = FALSE)
+MYC <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="MYC",colNames = FALSE)
+E2F <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="E2F",colNames = FALSE)
+invasion <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="invasion",colNames = FALSE)
+p53 <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="p53",colNames = FALSE)
+EMT <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="EMT",colNames = FALSE)
+
+gene_sets <- list(
+  proliferation = proliferation,
+  stemness=stemness,
+  quiescence=quiescence,
+  metastasis=metastasis,
+  pMYC=MYC,
+  pE2F=E2F,
+  invasion=invasion,
+  pP53=p53,
+  EMT=EMT
+)
+
+scrna.037 <- AddModuleScore_UCell(scrna.037, features = gene_sets, ncores=4, name = "")
+
+VlnPlot2(scrna.037, features=names(gene_sets), group.by = "DLL3_group", pt=F,show.mean=TRUE,
+  width=0.5, stat.method = "wilcox.test", ncol=2,cols=c("blue","red"), label="p.format",label.size=2.2)
+
+ggsave((paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_SCLC_SMpathway_score_epi.pdf")))
+
+## get NE signatures
+
+### NE Alshalafa
+
+NE_Alshalalfa <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Alshalalfa",colNames = FALSE)
+
+NE_Alshalalfa_All <- NE_Alshalalfa$X1
+
+NE_Alshalalfa_UP <- NE_Alshalalfa$X1[which(NE_Alshalalfa$X2=="UP")]
+
+NE_Alshalalfa_DOWN <- NE_Alshalalfa$X1[which(NE_Alshalalfa$X2=="DOWN")]
+
+NE_Alshalalfa <- list(Alshalalfa_All=NE_Alshalalfa_All,Alshalalfa_UP=NE_Alshalalfa_UP,Alshalalfa_DOWN=NE_Alshalalfa_DOWN)
+
+
+## NE Balanis
+
+NE_Balanis <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Balanis",colNames = FALSE)[,1]
+
+
+## NE Beltran
+
+NE_Beltran <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Beltran",colNames = FALSE)
+
+NE_Beltran_All <- NE_Beltran$X1
+
+NE_Beltran_UP <- NE_Beltran$X1[which(NE_Beltran$X2=="UP")]
+
+NE_Beltran_DOWN <- NE_Beltran$X1[which(NE_Beltran$X2=="DOWN")]
+
+
+
+## NE Kumar
+
+NE_Kumar <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Kumar",colNames = FALSE)[,1]
+
+
+## NE Tsai
+
+NE_Tsai69 <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Tsai69",colNames = FALSE)
+
+NE_Tsai306 <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Tsai306",colNames = FALSE)
+
+NE_Tsai <- rbind(NE_Tsai69,NE_Tsai306)
+
+NE_Tsai_All <- NE_Tsai$X1
+
+NE_Tsai_UP <- NE_Tsai$X1[which(NE_Tsai$X2=="UP")]
+
+NE_Tsai_DOWN <- NE_Tsai$X1[which(NE_Tsai$X2=="DOWN")]
+
+
+### put all list together
+
+NE <- list(Alshalalfa_All=NE_Alshalalfa_All,Alshalalfa_UP=NE_Alshalalfa_UP,Alshalalfa_DOWN=NE_Alshalalfa_DOWN,
+           Balanis=NE_Balanis,
+           Beltran_All=NE_Beltran_All,Beltran_UP=NE_Beltran_UP,Beltran_DOWN=NE_Beltran_DOWN,
+           Kumar=NE_Kumar,
+           Tsai_All=NE_Tsai_All,Tsai_UP=NE_Tsai_UP,Tsai_DOWN=NE_Tsai_DOWN)
+
+scrna.037 <- AddModuleScore_UCell(scrna.037, features = NE, ncores=4, name = "")
+
+VlnPlot2(scrna.037, features=names(NE), group.by = "DLL3_group", pt=F,show.mean=TRUE,
+  width=0.5, stat.method = "wilcox.test", ncol=2,cols=c("blue","red"), label="p.format",label.size=1.8)
+
+ggsave((paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_SCLC_NE_pathway_score_epi.pdf")))
+
+### re-run infercnv for CTC samples without platelet in reference at ERIS
+scrna.002<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC002.scrna.seurat.final.rds"))
+
+epi_sub <- subset(scrna.002,subset=final_anno %in% c("endothelial","myeloid","T","B","epithelial"))
+
+## subset
+
+counts <- epi_sub@assays$RNA@layers$counts
+
+rownames(counts) <- rownames(epi_sub)
+colnames(counts) <- colnames(epi_sub)
+
+## input 3: sample annotation file
+
+
+annotation <- as.data.frame(epi_sub@meta.data[,c("final_anno","sample")])
+
+annotation <- annotation[1]
+
+
+
+write.table(annotation, file="../results/MGHSCLC002031036037/inferCNV/002/inputs/singleCell.annotation.withoutPlatelet.txt",quote=FALSE,col.names = FALSE,row.names=TRUE,sep="\t")
+
+ 
+# create the infercnv object
+infercnv_obj = CreateInfercnvObject(raw_counts_matrix=counts,
+                                    annotations_file="../results/MGHSCLC002031036037/inferCNV/002/inputs/singleCell.annotation.withoutPlatelet.txt",
+                                    delim="\t",
+                                    gene_order_file="/data/rama/labMembers/mao20/reference/hg38_gencode_v27.txt",
+                                    chr_exclude = c("chrX","chrY","chrM"),
+                                    ref_group_names=c("endothelial","myeloid","T","B"))
+
+options(scipen = 100)
+# perform infercnv operations to reveal cnv signal
+infercnv_obj = infercnv::run(infercnv_obj,
+                             cutoff=0.1,  # use 1 for smart-seq, 0.1 for 10x-genomics
+                             out_dir="../results/MGHSCLC002031036037/inferCNV/002/output_rv",  # dir is auto-created for storing outputs
+                             cluster_by_groups=T,   # cluster
+                             analysis_mode= "samples",
+                             denoise=T,
+                             HMM=T,
+                             num_threads=4,
+                             output_format = "pdf"
+                             )   
+
+### 037
+scrna.037<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC037.scrna.seurat.with.anno.rds"))
+
+## downsample to speed up infercnv
+
+scrna.037.down <- subset(scrna.037,downsample=2000)
+
+## exclude RBC
+
+scrna.037.down <- subset(scrna.037.down,subset=final_anno %in% c("RBC","platelet"),invert=TRUE)
+                             
+## download gene order file from 
+## /data/rama/labMembers/mao20/reference/hg38_gencode_v27.txt"
+
+##Input 2: count matrix
+
+## subset
+
+counts <- scrna.037.down@assays$RNA@layers$counts
+
+rownames(counts) <- rownames(scrna.037.down)
+colnames(counts) <- colnames(scrna.037.down)
+
+## input 3: sample annotation file
+
+
+annotation <- as.data.frame(scrna.037.down@meta.data[,c("final_anno","sample")])
+
+annotation <- annotation[1]
+
+write.table(annotation, file="../results/MGHSCLC002031036037/inferCNV/037/inputs/singleCell.annotation.withoutPlatelet.txt",quote=FALSE,col.names = FALSE,row.names=TRUE,sep="\t")
+
+ 
+# create the infercnv object
+infercnv_obj = CreateInfercnvObject(raw_counts_matrix=counts,
+                                    annotations_file="../results/MGHSCLC002031036037/inferCNV/037/inputs/singleCell.annotation.withoutPlatelet.txt",
+                                    delim="\t",
+                                    gene_order_file="/data/rama/labMembers/mao20/reference/hg38_gencode_v27.txt",
+                                    chr_exclude = c("chrX","chrY","chrM"),
+                                    ref_group_names=c("endothelial","monocyte","T","neutrophil","NK","mast","B","plasma","pDC"))
+
+options(scipen = 100)
+# perform infercnv operations to reveal cnv signal
+infercnv_obj = infercnv::run(infercnv_obj,
+                             cutoff=0.1,  # use 1 for smart-seq, 0.1 for 10x-genomics
+                             out_dir="../results/MGHSCLC002031036037/inferCNV/037/output_rv",  # dir is auto-created for storing outputs
+                             cluster_by_groups=T,   # cluster
+                             analysis_mode= "samples",
+                             denoise=T,
+                             HMM=T,
+                             num_threads=4,
+                             output_format = "pdf"
+                             )   
+
+
+### additional GSEA: 
+
+### three populations: DLL3+ low EpCAM vs DLL3+ high EpCAM (using the median?) vs DLL3- high EpCAM, DLL3- low EpCAM
+
+scrna.037<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC037.scrna.seurat.with.anno.rds"))
+scrna.037 <- subset(scrna.037,subset=final_anno=="epithelial")
+
+## assign DLL3 pos/neg group
+scrna.037$DLL3_group <- "DLL3_neg"
+ 
+scrna.037$DLL3_group[which(scrna.037[['RNA']]$data["DLL3",] > 0)] <- "DLL3_pos" 
+scrna.037$DLL3_group <- factor(scrna.037$DLL3_group)
+
+##### assign EPCAM high/low group
+scrna.037$EPCAM_group <- "EPCAM_low"
+epcam_median <- median(scrna.037[['RNA']]$data["EPCAM",])
+scrna.037$EPCAM_group[which(scrna.037[['RNA']]$data["EPCAM",] > epcam_median)] <- "EPCAM_high" 
+scrna.037$EPCAM_group <- factor(scrna.037$EPCAM_group)
+
+### assign combine group
+
+scrna.037$DLL3_EPCAM <- paste0(scrna.037$DLL3_group,"_",scrna.037$EPCAM_group)
+
+scrna.037$DLL3_EPCAM  <- factor(scrna.037$DLL3_EPCAM, levels=c("DLL3_pos_EPCAM_low","DLL3_pos_EPCAM_high","DLL3_neg_EPCAM_high","DLL3_neg_EPCAM_low"))
+
+sample <- "MGHSCLC037"
+###GSEA
+
+proliferation <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="proliferation",colNames = FALSE)
+stemness <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="stemness",colNames = FALSE)
+quiescence <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="quiescence",colNames = FALSE)
+metastasis <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="metastasis",colNames = FALSE)
+MYC <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="MYC",colNames = FALSE)
+E2F <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="E2F",colNames = FALSE)
+invasion <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="invasion",colNames = FALSE)
+p53 <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="p53",colNames = FALSE)
+EMT <- read.xlsx("/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/pathway_genesets.xlsx",sheet="EMT",colNames = FALSE)
+
+gene_sets <- list(
+  proliferation = proliferation,
+  stemness=stemness,
+  quiescence=quiescence,
+  metastasis=metastasis,
+  pMYC=MYC,
+  pE2F=E2F,
+  invasion=invasion,
+  pP53=p53,
+  EMT=EMT
+)
+
+## save
+
+save(gene_sets,file="/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/tumor.aggressiveness.list.RData")
+
+scrna.037 <- AddModuleScore_UCell(scrna.037, features = gene_sets, ncores=4, name = "")
+
+VlnPlot2(scrna.037, features=names(gene_sets), group.by = "DLL3_EPCAM", pt=F,show.mean=TRUE,
+  width=0.5, stat.method = "wilcox.test", ncol=2,cols=c("red","orange","cyan","blue"), label="p.format",label.size=2.2)+ theme(axis.text.x = element_blank())
+
+ggsave((paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_SCLC_SMpathway_score_epi_by_DLL3_EPCAM.pdf")))
+
+## get NE signatures
+
+### NE Alshalafa
+
+NE_Alshalalfa <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Alshalalfa",colNames = FALSE)
+
+NE_Alshalalfa_All <- NE_Alshalalfa$X1
+
+NE_Alshalalfa_UP <- NE_Alshalalfa$X1[which(NE_Alshalalfa$X2=="UP")]
+
+NE_Alshalalfa_DOWN <- NE_Alshalalfa$X1[which(NE_Alshalalfa$X2=="DOWN")]
+
+NE_Alshalalfa <- list(Alshalalfa_All=NE_Alshalalfa_All,Alshalalfa_UP=NE_Alshalalfa_UP,Alshalalfa_DOWN=NE_Alshalalfa_DOWN)
+
+
+## NE Balanis
+
+NE_Balanis <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Balanis",colNames = FALSE)[,1]
+
+
+## NE Beltran
+
+NE_Beltran <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Beltran",colNames = FALSE)
+
+NE_Beltran_All <- NE_Beltran$X1
+
+NE_Beltran_UP <- NE_Beltran$X1[which(NE_Beltran$X2=="UP")]
+
+NE_Beltran_DOWN <- NE_Beltran$X1[which(NE_Beltran$X2=="DOWN")]
+
+
+
+## NE Kumar
+
+NE_Kumar <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Kumar",colNames = FALSE)[,1]
+
+
+## NE Tsai
+
+NE_Tsai69 <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Tsai69",colNames = FALSE)
+
+NE_Tsai306 <- read.xlsx("/Users/me73/Partners HealthCare Dropbox/Maoxuan Lin/projects/shihbo/fromShihBo/NEPC_genesigs.xlsx",sheet="Tsai306",colNames = FALSE)
+
+NE_Tsai <- rbind(NE_Tsai69,NE_Tsai306)
+
+NE_Tsai_All <- NE_Tsai$X1
+
+NE_Tsai_UP <- NE_Tsai$X1[which(NE_Tsai$X2=="UP")]
+
+NE_Tsai_DOWN <- NE_Tsai$X1[which(NE_Tsai$X2=="DOWN")]
+
+
+### put all list together
+
+NE <- list(Alshalalfa_All=NE_Alshalalfa_All,Alshalalfa_UP=NE_Alshalalfa_UP,Alshalalfa_DOWN=NE_Alshalalfa_DOWN,
+           Balanis=NE_Balanis,
+           Beltran_All=NE_Beltran_All,Beltran_UP=NE_Beltran_UP,Beltran_DOWN=NE_Beltran_DOWN,
+           Kumar=NE_Kumar,
+           Tsai_All=NE_Tsai_All,Tsai_UP=NE_Tsai_UP,Tsai_DOWN=NE_Tsai_DOWN)
+
+## save object
+
+save(NE,file="/Volumes/rama/labMembers/mao20/MGH2024/CTC/pathways/NE.pathway.list.RData")
+
+scrna.037 <- AddModuleScore_UCell(scrna.037, features = NE, ncores=4, name = "")
+
+VlnPlot2(scrna.037, features=names(NE), group.by = "DLL3_EPCAM", pt=F,show.mean=TRUE,
+  width=0.5, stat.method = "wilcox.test", ncol=2,cols=c("red","orange","cyan","blue"), label="p.format",label.size=2) + theme(axis.text.x = element_blank())
+
+ggsave((paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_SCLC_NE_pathway_score_epi_by_DLL3_EPCAM.pdf")))
+
+
+## use whole dataset and check if these signatures are higher in tumor cells than other cell types
+
+
+scrna.037<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC037.scrna.seurat.with.anno.rds"))
+
+scrna.037 <- AddModuleScore_UCell(scrna.037, features = gene_sets, ncores=4, name = "")
+
+VlnPlot2(scrna.037, features=names(gene_sets), group.by = "final_anno", pt=F,show.mean=TRUE,
+  width=0.5, ncol=2)
+
+ggsave((paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_SCLC_SMpathway_score_allcelltype_by_DLL3_EPCAM.pdf")))
+
+### NE
+
+
+scrna.037 <- AddModuleScore_UCell(scrna.037, features = NE, ncores=4, name = "")
+
+VlnPlot2(scrna.037, features=names(NE), group.by = "final_anno", pt=F,show.mean=TRUE,
+  width=0.5,  ncol=2)
+ggsave((paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_",sample,"_SCLC_NE_pathway_score_allcelltype_by_DLL3_EPCAM.pdf")))
+
+
+#### get DLL3+ Cells distribution across cell types
+
+scrna.037<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC037.scrna.seurat.with.anno.rds"))
+
+scrna.037$DLL3_group <- "neg"
+
+scrna.037$DLL3_group[which(scrna.037[['RNA']]$data["DLL3",] > 0)] <- "pos" 
+scrna.037$DLL3_group <- factor(scrna.037$DLL3_group)
+
+data <- data.frame(unclass(table(scrna.037$final_anno,scrna.037$DLL3_group)/colSums(table(scrna.037$final_anno,scrna.037$DLL3_group))))
+
+data$cellType <- rownames(data)
+
+colnames(data) <- c("DLL3_neg","DLL3_pos","cellType")
+
+data$lbls <- ifelse(data$DLL3_pos >0.1,paste0(round(data$DLL3_pos*100),"%"),"")
+
+data$cellType <- factor(data$cellType,levels=c("epithelial",data$cellType[-which(data$cellType=="epithelial")]))
+# Basic piechart
+ggplot(data, aes(x="", y=DLL3_pos, fill=cellType)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  coord_polar("y", start=0) +
+  geom_text(aes(label = lbls),position = position_stack(vjust = 0.5)) +theme_void() +
+  ggtitle("%DLL3-positive cells by cell type")
+
+ggsave((paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_DLL3_pos_cell_distribution_by_cellType.pdf")))
+
+
+### get EPCAM and CK expression range
+epi_sub <- subset(scrna.037,subset=final_anno=="epithelial")
+
+exp(range(epi_sub[['RNA']]$data["EPCAM",which(epi_sub[['RNA']]$data["EPCAM",] > 0)]))-1
+#[1]  0.1546288 73.9371534
+## define CK +/-
+expr_matrix <- FetchData(epi_sub, vars = c("KRT8","KRT18","KRT19"))
+
+exp(range(expr_matrix[expr_matrix != 0]))-1
+
+# 0.04227901 38.75968992
+```
+
