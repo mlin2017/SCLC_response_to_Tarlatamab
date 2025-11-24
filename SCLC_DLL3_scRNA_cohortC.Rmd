@@ -1,5 +1,5 @@
 ---
-title: "SCLC_DLL3_scRNA_cohortC"
+title: "01_SCLC_scRNA"
 output: html_document
 date: "2025-01-10"
 ---
@@ -3290,6 +3290,8 @@ ggboxplot(samType, x = "SCLC_subtype", y = "Value",
 ggsave(here(paste0("../../plots/",Sys.Date(),"_DLL3_pos_percent_between_subtype_A_and_N.pdf")))
 
 
+### final S8
+
 #############
 ### pie for three targets by main subtype at sample level
 
@@ -3902,7 +3904,7 @@ ggarrange(plotlist = plot_list, ncol = 2, nrow = 2)
 
 ggsave(here(paste0("../../plots/",Sys.Date(),"_spearman_corr_DLL3_by_subtype_in_MainA.pdf")))
 
-
+## Final S7B
 
 
 #### reannotate using the same gene sets as MGH
@@ -4526,6 +4528,7 @@ res$p.value
 
 #############
 ## at sample level
+## go to supplemenatry data2
 inDir <- "/Volumes/rama/labMembers/mao20/MGH2024/CTC/SCLC/data/public/chan_cc_2021"
 
 sclc <- readRDS(paste0(inDir,"/sclc_epithelial_cells_high_capture_v1.0.rds"))
@@ -4913,6 +4916,7 @@ ggarrange(p3,p2,p1, ncol=3,common.legend=TRUE, legend="bottom",widths=c(2.4,1,0.
 
 ggsave(here(paste0("../../plots/",Sys.Date(),"_stackedbar_by_DLL3_and_subtype_per_sample_orderBySCLCA_splitByMainSubtype.pdf")))
 
+### final figure 2B
 
 ### 2D specify y scale and increase dot size
 
@@ -4928,7 +4932,7 @@ ggboxplot(df_cc, x = "Treatment", y = "Pdll3", color = "Treatment", palette=c("b
 
 ggsave(here(paste0("../../plots/",Sys.Date(),"_boxplot_by_DLL3_per_sample_by_stage.pdf")))
 
-
+### Final 2D
 
 
 ```
@@ -5225,6 +5229,8 @@ ggarrange(p3,p2,p1, ncol=3,common.legend=TRUE, legend="bottom",widths=c(2.4,1,0.
 
 ggsave(here(paste0("../../plots/",Sys.Date(),"_stackedbar_by_SEZ6_B7H3_subtype_per_sample_orderBySCLCA_splitByMainSubtype.pdf")))
 
+## final supplmenatry figure18
+
 ### venn diagram for pooled data
 
 inDir <- "/Volumes/rama/labMembers/mao20/MGH2024/CTC/SCLC/data/public/chan_cc_2021"
@@ -5266,7 +5272,7 @@ ggarrange(plotlist = plot.list, ncol = 5, nrow = 4)
 
 ggsave(here(paste0("../../plots/",Sys.Date(),"_three_target_by_individual_allIn1.pdf")))
 
-
+### final supplementary S19
 
 ```
 
@@ -5456,6 +5462,8 @@ p1 <- ggboxplot(df, x = "subtype", y = "DLL3",
 #ggsave(here(paste0("../../manuscript/revision/",Sys.Date(),"_boxplot_by_DLL3_pseudobulk_by_subtype_allCell.pdf")))
 
 
+### final S9B (pseudobulk DLL3 across all subtypes)
+
 ### ASCL1
 
 p2 <- ggboxplot(df, x = "subtype", y = "ASCL1",
@@ -5465,6 +5473,7 @@ p2 <- ggboxplot(df, x = "subtype", y = "ASCL1",
 
 #ggsave(here(paste0("../../manuscript/revision/",Sys.Date(),"_boxplot_by_ASCL1_pseudobulk_by_subtype_allCell.pdf")))
 
+### final S9B (pseudobulk ASCL1 across all subtypes)
 
 ### NEUROD1
 
@@ -5514,6 +5523,7 @@ ggscatter(dfinal2, x = "SCLC_A", y = "DLL3", color = "subtype",
 
 ggsave(here(paste0("../../manuscript/revision/",Sys.Date(),"_pseudobulk_DLL3_Atype_cor_spearman_all_sample.pdf")))
 
+
 ## only samples with SCLC-A as main type
 
 dfinalA <- dfinal2[which(dfinal2$subtype=="SCLC-A"),]
@@ -5562,6 +5572,8 @@ for(gene in smarker){
   ggsave(here(paste0("../../manuscript/revision/",Sys.Date(),"_pseudobulk_",gene,"_DLL3_cor_spearman_all_sample.pdf")))
 }
 
+### final S9A (ASCL1 vs DLL3 using all subtypes)
+
 ## SCLC marker and DLL3 with only Atype
 
 dfinalA <- dfinal2[which(dfinal2$subtype=="SCLC-A"),]
@@ -5576,7 +5588,7 @@ for(gene in smarker){
   ggsave(here(paste0("../../manuscript/revision/",Sys.Date(),"_pseudobulk_",gene,"_DLL3_cor_spearman_Atype_sample.pdf")))
 }
 
-
+### final S9A (ASCL1 vs DLL3 using -A subtype only)
 
 #### split into low, medium, and high
 
@@ -6893,7 +6905,61 @@ bulk.sclc.de <- FindMarkers(object = pseudo_sclc,
                          test.use = "DESeq2")
 head(bulk.sclc.de, n = 15)
 
+#############
+### finalize co-expression of DLL3, EpCAM, and CK(now use 4, 5, 6, 8, 10, 13 and 18) 
 
+inDir <- "/Volumes/rama/labMembers/mao20/MGH2024/CTC/SCLC/data/public/chan_cc_2021"
+
+sclc <- readRDS(paste0(inDir,"/sclc_epithelial_cells_high_capture_v1.0.rds"))
+
+
+## assign DLL3 pos/neg group
+
+## assign EPCAM pos/neg group
+sclc$EPCAM_group <- "neg"
+ 
+sclc$EPCAM_group[which(sclc[['RNA']]$data["EPCAM",] > 0)] <- "pos" 
+sclc$EPCAM_group <- factor(sclc$EPCAM_group)
+
+
+## define CK +/-
+sclc$CK_group <- "neg"
+expr_matrix <- FetchData(sclc, vars = c("KRT4","KRT5","KRT6","KRT8","KRT10","KRT13","KRT18"))
+# Warning: The following requested variables were not found: KRT6
+sclc$CK_group[which(rowSums(expr_matrix > 0) > 0)] <- "pos"
+sclc$CK_group <- factor(sclc$CK_group)
+
+## negative
+
+neg <- WhichCells(sclc, expression=DLL3_group=="neg" & EPCAM_group=="neg" & CK_group=="neg") #282
+
+DLL3_pos <- WhichCells(sclc, expression=DLL3_group=="pos")
+EPCAM_pos <- WhichCells(sclc, expression=EPCAM_group=="pos")
+CK_pos <- WhichCells(sclc, expression=CK_group=="pos")
+
+## let's use ggvenn and add rectangle to the venn diagram
+
+a2 <- list(`DLL3+`=DLL3_pos,`EpCAM+`=EPCAM_pos,`CK+`=CK_pos)
+
+ggvenn(a2)
+
+ggvenn(a2,fill_color=c("orange","blue","yellow"), show_percentage=FALSE,set_name_size=0,text_size=4) +
+  annotate("rect",xmin = -2, xmax = 2, ymin = -2, ymax = 2, fill = "lightblue",alpha=0.3) +
+  annotate("text",x=-1.6,y=1.6,label="DLL3+") +
+  annotate("text",x=-0.8,y=0.4,label="(0.3%)") +
+  annotate("text",x=0,y=0.6,label="(0.3%)") +
+  annotate("text",x=0.8,y=0.4,label="(0.5%)") +
+  annotate("text",x=-0.5,y=-0.2,label="(3.3%)") +
+  annotate("text",x=0,y=0,label="(61.1%)") +
+  annotate("text",x=0.5,y=-0.2,label="(29.9%)") +
+  annotate("text",x=0,y=-0.8,label="(4.0%)") +
+  annotate("text",x=1.6,y=1.6,label="EpCAM+") +
+  annotate("text",x=1,y=-1.4,label="CK+") +
+  annotate("text",x=-0.1,y=-1.8,label="Marker Neg 282(0.6%)") + ggtitle("Cohort C")+theme(plot.title = element_text(hjust = 0.5))
+
+ggsave((paste0("../../manuscript/revision/",Sys.Date(),"_venn_EPCAM_DLL3_CK_neg_ggvenn_cohortC.pdf")))
+
+### final supplementary S21 B
 
 
 ```

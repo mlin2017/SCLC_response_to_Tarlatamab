@@ -12,7 +12,49 @@ knitr::opts_chunk$set(echo = TRUE)
 
 This is an R Markdown document for analyzing 10x scRNA-seq generated from SH for SCLC project.
 
+## Step 1: setup
 
+```{r}
+# Load libraries
+library(SingleCellExperiment)
+library(Seurat)
+library(tidyverse)
+library(Matrix)
+library(scales)
+library(cowplot)
+library(RCurl)
+library(here)
+library(SoupX)
+library(DoubletFinder)
+library(openxlsx)
+library(celldex)
+library(SingleR)
+
+library(ggrepel)
+
+library(msigdbr)
+library(clusterProfiler)
+library(ggplot2)
+library(stringr)
+library(infercnv)
+
+library(GeneNMF)
+library(fgsea)
+library(UCell)
+
+library(ggpubr)
+library(data.table)
+
+library(SeuratExtend)
+library(webr)
+library(ggvenn)
+library(eulerr)
+library(gridExtra)
+
+library(UpSetR)
+
+options(future.globals.maxSize = 16000 * 1024^2)
+```
 ## Step 5: reanalysis with combination of two runs 
 
 ## Step 5.1: QC
@@ -2718,6 +2760,8 @@ DimPlot(
 
 ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_allCell_037_noPlatelet.pdf")))
 
+## final figure 7D (main)
+
 ## CTC only with three labeled
 ## assign three groups
 
@@ -3212,7 +3256,7 @@ p+
 ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_SEZ6_DLL3_B7H3_binary_tumorOnly_037_newColor_5.pdf")))
 
 
-
+## final figure 7D inset
 
 ## 7E:
 # single cell expression Of DLL3, SEZ6, B7H3 in CTCs from pt 37
@@ -3250,7 +3294,7 @@ p <- plot(fit,
 g <- grid.arrange(grobs=list(p))
 ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_SEZ6_DLL3_B7H3_euler_bothCP_differentSize_037_tumorOnly.pdf")),g)
 
-### not sure why adding the round parameter to the simple code did not work
+### figure 7F later refined in 7F
 
 ## 7F: 
 # single cell expression Of EpCAM vs “any of DLL3, SEZ6, B7H3” Out of denominator of CNV+ cells  in CTCs from pt 37
@@ -3282,6 +3326,7 @@ ggvenn(a2,fill_color=c("blue","orangered"), auto_scale=TRUE,show_percentage=FALS
 
 ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_all_ggvenn_037.pdf")))
 
+### final figure 7E
 
 ## 7G: single cell expression of DLL3, SEZ6,  B7H3 in CTCs from pt 02 (recurrent)
 
@@ -3315,6 +3360,7 @@ p <- plot(euler(a, shape = "ellipse"),quantities=TRUE,fill = list(fill = c("oran
 g <- grid.arrange(grobs=list(p))
 ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_allIn_euler_002.pdf")),g)
 
+## figure 7G later refined in illustrator
 
 ### supplementary figure 7 for 036
 
@@ -3338,6 +3384,8 @@ DimPlot(
   cols=c("neutrophil"="#7CAE00","monocyte"="#008FC4","unknown"="#9999CC","fibroblast"="#00C19A","lymphocyte"="#E68613","epithelial"="#FF3300","endothelial"="#99CCCC")) + theme(legend.position = "none")+ labs(title="Patient A")
 
 ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_allCell_036_noPlatelet.pdf")))
+
+## final S20A main
 
 ## CTC only with three labeled
 ## assign three groups
@@ -3367,6 +3415,8 @@ FeaturePlot3(scrna.036.sub, feature.1 = "DLL3_", feature.2 = "SEZ6_", feature.3 
 FeaturePlot3(scrna.036.sub, feature.2 = "DLL3_", feature.1 = "SEZ6_", feature.3 = "B7H3_", pt.size = 0.1, color.range=c(0,1))
 ggsave(here(paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_UMAP_SEZ6_DLL3_B7H3_binary_smallDot.tumorOnly_036.pdf")))
 
+## figure S20A inset
+
 
 ## S7E:
 # single cell expression Of DLL3, SEZ6, B7H3 in CTCs from pt 36
@@ -3393,6 +3443,7 @@ ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_SEZ6_DL
 ggvenn(a,fill_color = c("orangered", "gold","royalblue"))
 
 ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_SEZ6_DLL3_B7H3_ggvenn_bothCP_036_tumorOnly.pdf")))
+## figure S20c later refined in illustrator
 
 ## S7F: 
 # single cell expression Of EpCAM vs “any of DLL3, SEZ6, B7H3” Out of denominator of CNV+ cells  in CTCs from pt 36
@@ -3424,6 +3475,7 @@ ggvenn(a2,fill_color=c("blue","orangered"), auto_scale=TRUE,show_percentage=FALS
 
 ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_all_ggvenn_036.pdf")))
 
+## final figure S20B
 
 ### S7G: all in for 002
 
@@ -3453,6 +3505,7 @@ a <- list(`negative`=all,`EpCAM+`=EPCAM_pos,`DLL3/SEZ6/B7H3+`=Any1_pos)
 p <- plot(euler(a, shape = "circle"), quantities = list(type = c("counts", "percent")),fill = list(fill = c("gray", "lightblue","orangered")))
 g <- grid.arrange(grobs=list(p))
 ggsave((paste0("../results/MGHSCLC002031036037/plots/",Sys.Date(),"_venn_allIn_euler_002.pdf")),g)
+## final 7G later refined in illustrator
 
 ## let's use ggvenn and add rectangle to the venn diagram
 
@@ -4607,6 +4660,7 @@ ggplot(data, aes(x="", y=DLL3_pos, fill=cellType)) +
 
 ggsave((paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_DLL3_pos_cell_distribution_by_cellType.pdf")))
 
+## final S22B
 
 ### get EPCAM and CK expression range
 epi_sub <- subset(scrna.037,subset=final_anno=="epithelial")
@@ -4619,5 +4673,64 @@ expr_matrix <- FetchData(epi_sub, vars = c("KRT8","KRT18","KRT19"))
 exp(range(expr_matrix[expr_matrix != 0]))-1
 
 # 0.04227901 38.75968992
+
+
+### finalize co-expression of DLL3, EpCAM, and CK(now use 4, 5, 6, 8, 10, 13 and 18) 
+scrna.037<- readRDS(paste0("../results/MGHSCLC002031036037/Rdata/MGHSCLC037.scrna.seurat.with.anno.rds"))
+## three in one plot
+epi_sub <- subset(scrna.037,subset=final_anno=="epithelial")
+
+
+## assign DLL3 pos/neg group
+epi_sub$DLL3_group <- "neg"
+ 
+epi_sub$DLL3_group[which(epi_sub[['RNA']]$data["DLL3",] > 0)] <- "pos" 
+epi_sub$DLL3_group <- factor(epi_sub$DLL3_group)
+
+
+## assign EPCAM pos/neg group
+epi_sub$EPCAM_group <- "neg"
+ 
+epi_sub$EPCAM_group[which(epi_sub[['RNA']]$data["EPCAM",] > 0)] <- "pos" 
+epi_sub$EPCAM_group <- factor(epi_sub$EPCAM_group)
+
+
+## define CK +/-
+epi_sub$CK_group <- "neg"
+expr_matrix <- FetchData(epi_sub, vars = c("KRT4","KRT5","KRT6","KRT8","KRT10","KRT13","KRT18"))
+epi_sub$CK_group[which(rowSums(expr_matrix > 0) > 0)] <- "pos"
+epi_sub$CK_group <- factor(epi_sub$CK_group)
+
+## negative
+
+neg <- WhichCells(epi_sub, expression=DLL3_group=="neg" & EPCAM_group=="neg" & CK_group=="neg")
+
+DLL3_pos <- WhichCells(epi_sub, expression=DLL3_group=="pos")
+EPCAM_pos <- WhichCells(epi_sub, expression=EPCAM_group=="pos")
+CK_pos <- WhichCells(epi_sub, expression=CK_group=="pos")
+
+## let's use ggvenn and add rectangle to the venn diagram
+
+a2 <- list(`DLL3+`=DLL3_pos,`EpCAM+`=EPCAM_pos,`CK+`=CK_pos)
+
+ggvenn(a2)
+
+ggvenn(a2,fill_color=c("orange","blue","yellow"), show_percentage=FALSE,set_name_size=0,text_size=4) +
+  annotate("rect",xmin = -2, xmax = 2, ymin = -2, ymax = 2, fill = "lightblue",alpha=0.3) +
+  annotate("text",x=-1.6,y=1.6,label="DLL3+") +
+  annotate("text",x=-0.8,y=0.4,label="(0.3%)") +
+  annotate("text",x=0,y=0.6,label="(1.2%)") +
+  annotate("text",x=0.8,y=0.4,label="(3.2%)") +
+  annotate("text",x=-0.5,y=-0.2,label="(1.1%)") +
+  annotate("text",x=0,y=0,label="(62.9%)") +
+  annotate("text",x=0.5,y=-0.2,label="(18%)") +
+  annotate("text",x=0,y=-0.8,label="(6%)") +
+  annotate("text",x=1.6,y=1.6,label="EpCAM+") +
+  annotate("text",x=1,y=-1.4,label="CK+") +
+  annotate("text",x=-0.1,y=-1.8,label="Marker Neg 86(7.3%)") 
+
+ggsave((paste0("../results/MGHSCLC002031036037/revision/",Sys.Date(),"_venn_EPCAM_DLL3_CK_neg_ggvenn_037.pdf")))
+
+## final supplementary figure 21C
 ```
 
