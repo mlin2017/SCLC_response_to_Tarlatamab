@@ -19,3 +19,9 @@ generate fastq files for three SCLC patients's CTC single cell RNA-seq.
 # cellranger_MGHSCLC{002|036|037}_combined.sh
 
 run cellranger count pipeline for CTC scRNA-seq data to get count metrix for downstream analysis.
+
+# Data availability
+
+Raw fastq files for single cell RNA-seq from 10 SCLC tumors are available upon request at EGA ( EGA study number: EGAS50000001400, EGA dataset number: EGAD50000002034), and count matrices (in .h5 format) can be downloaded from ArrayExpress (E-MTAB-16412).
+
+Raw fastq files for single cell RNA-seq of CTCs from three patients are available upon request at EGA ( EGA study number: EGAS50000001401, EGA dataset number: EGAD50000002035), and count matrices (in .h5 format) can be downloaded from ArrayExpress (E-MTAB-16413).
